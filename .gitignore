@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# Distribution / packaging
+dist/
+build/
+*.spec
+*.exe
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local configuration
+screenshot_ocr_config.json
+translation_history.json
+tesseract_path.txt
+
+# IDE
+.vscode/
+.idea/
+.trae/
+
+# Logs
+*.log

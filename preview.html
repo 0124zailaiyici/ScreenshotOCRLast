@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ScreenshotOCR UI Preview</title>
+    <style>
+        :root {
+            --color-primary: #0078D4;
+            --color-success: #107C10;
+            --color-error: #D13438;
+            --color-bg-light: #F3F3F3;
+            --color-surface-light: #FFFFFF;
+            --color-text-primary: #333333;
+            --radius-m: 8px;
+            --shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            /* 1. 背景适配优化：模拟桌面壁纸 */
+            background: url('https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?auto=format&fit=crop&q=80&w=2070') no-repeat center center;
+            background-size: cover;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        /* Overlay Mockup */
+        .overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            /* 1. 背景适配优化：使用模糊效果模拟系统 UI */
+            background: rgba(0,0,0,0.3);
+            backdrop-filter: blur(4px);
+            z-index: 1;
+        }
+
+        .selection {
+            position: absolute;
+            top: 20%;
+            left: 20%;
+            width: 400px;
+            height: 250px;
+            /* 2. 选择区域色彩优化：双层描边方案 */
+            border: 1px dashed var(--color-primary);
+            outline: 2px solid white;
+            box-shadow: 0 0 0 9999px rgba(0,0,0,0.2);
+            pointer-events: none;
+        }
+
+        /* Floating Toolbar */
+        .toolbar {
+            position: absolute;
+            bottom: -50px;
+            right: 0;
+            background: var(--color-surface-light);
+            padding: 6px;
+            border-radius: var(--radius-m);
+            display: flex;
+            gap: 4px;
+            box-shadow: var(--shadow);
+            pointer-events: auto;
+            animation: slideUp 0.3s forwards;
+        }
+
+        @keyframes slideUp {
+            from { transform: translateY(20px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+
+        .btn {
+            border: none;
+            background: transparent;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.2s;
+            font-size: 14px;
+        }
+
+        .btn:hover {
+            background: #f0f0f0;
+        }
+
+        /* 2. 功能图标色彩优化：常驻颜色 */
+        .btn-pin { color: var(--color-primary); }
+        .btn-ocr { color: var(--color-success); font-weight: 600; }
+        .btn-copy { color: var(--color-primary); }
+
+        .btn-primary {
+            color: var(--color-primary);
+            font-weight: 600;
+        }
+
+        .icon {
+            font-size: 18px;
+        }
+
+        /* OCR Window Mockup */
+        .ocr-window {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 500px;
+            background: var(--color-surface-light);
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            z-index: 10;
+            display: none;
+            flex-direction: column;
+        }
+
+        .ocr-header {
+            padding: 16px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .ocr-content {
+            padding: 16px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'Consolas', monospace;
+            white-space: pre-wrap;
+            background: #fafafa;
+            margin: 16px;
+            border-radius: 4px;
+            border: 1px solid #eee;
+        }
+
+        .ocr-footer {
+            padding: 12px 16px;
+            border-top: 1px solid #eee;
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+
+        .label {
+            background: #0078D4;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            text-transform: uppercase;
+        }
+
+        .hint {
+            position: fixed;
+            top: 20px;
+            color: white;
+            z-index: 2;
+            background: rgba(0,0,0,0.6);
+            padding: 8px 16px;
+            border-radius: 20px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="hint">演示：点击选区下方的按钮</div>
+
+    <div class="overlay">
+        <div class="selection">
+            <div class="toolbar">
+                <button class="btn btn-pin" onclick="alert('已钉住到屏幕')">
+                    <span class="icon">📌</span> 钉住
+                </button>
+                <button class="btn btn-ocr btn-primary" onclick="showOCR()">
+                    <span class="icon">🔍</span> 识字
+                </button>
+                <button class="btn btn-copy" onclick="alert('图片已复制到剪贴板')">
+                    <span class="icon">📋</span> 复制
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="ocr-window" id="ocrWindow">
+        <div class="ocr-header">
+            <strong>OCR 识别结果</strong>
+            <span class="label">Auto-Detect</span>
+        </div>
+        <div class="ocr-content">
+Hello World!
+这是一个 OCR 识别示例。
+支持多行文本提取。
+        </div>
+        <div class="ocr-footer">
+            <button class="btn" onclick="hideOCR()">关闭</button>
+            <button class="btn btn-primary" onclick="alert('文本已复制')">复制全部</button>
+        </div>
+    </div>
+
+    <script>
+        function showOCR() {
+            document.getElementById('ocrWindow').style.display = 'flex';
+        }
+        function hideOCR() {
+            document.getElementById('ocrWindow').style.display = 'none';
+        }
+    </script>
+</body>
+</html>

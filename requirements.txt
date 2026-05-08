@@ -1,0 +1,7 @@
+pynput>=1.7.6        # 全局热键支持
+pystray>=0.19.5      # 系统托盘图标支持
+pytesseract>=0.3.10  # Tesseract OCR Python 封装
+Pillow>=10.0.0       # 图像处理库 (PIL)
+pywin32>=306         # Windows API 访问 (剪贴板)
+translators>=5.8.0   # 多引擎翻译支持
+pytest>=7.0.0        # 单元测试框架
