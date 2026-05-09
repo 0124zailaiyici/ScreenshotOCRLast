@@ -15,7 +15,7 @@ def build():
         '--onefile',            # 打包成单文件
         '--noconsole',          # 运行时不显示控制台
         '--clean',              # 打包前清理临时文件
-        
+
         # 强制包含的关键动态库
         '--hidden-import=pystray',
         '--hidden-import=pynput',
@@ -23,14 +23,16 @@ def build():
         '--hidden-import=win32clipboard',
         '--hidden-import=translators',
         '--hidden-import=PIL.ImageTk',
-        
+        '--hidden-import=ui_theme',
+        '--hidden-import=ui_icons',
+
         # 排除不必要的超大库以减小体积
         '--exclude-module=matplotlib',
         '--exclude-module=notebook',
         '--exclude-module=pandas',
         '--exclude-module=scipy',
         '--exclude-module=torch',
-        '--exclude-module=setuptools', # 避开沙盒环境中的版本解析 bug
+        '--exclude-module=setuptools',
     ]
 
     try:

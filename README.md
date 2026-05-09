@@ -86,6 +86,10 @@ python build_exe.py
 
 ## 7. 更新日志 (Changelog)
 
+### [v1.2.1] - 2026-05-09
+
+- **\[Build]** 优化打包流程：使用独立 venv 构建，排除 Anaconda 环境的冗余库（sphinx/pytest/pandas 等），EXE 从 125MB 缩减至 30MB
+
 ### [v1.2.0] - 2026-05-09
 
 - **\[UI]** 全新主题系统：支持深色/浅色模式自动切换，跟随系统主题色

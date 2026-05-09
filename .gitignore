@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 .venv/
 venv/
+.build_venv/
 ENV/
 env/
 .env
