@@ -10,6 +10,8 @@ from screenshot_overlay import select_region
 from ocr_window import show_ocr_window
 from pin_window import show_pin_window
 from config import config_manager
+from ui_theme import theme_manager
+from ui_icons import icons
 
 # Windows API Constants
 ERROR_ALREADY_EXISTS = 183
@@ -21,6 +23,11 @@ class ScreenshotOCRApp:
 
     def __init__(self):
         self._check_single_instance()
+        # 初始化主题
+        theme_manager.update(
+            is_dark=config_manager.is_dark_mode(),
+            accent_color=config_manager.get_system_accent_color()
+        )
         # 截图会话并发锁，防止快速多次按热键创建多个 Tk 实例
         self._screenshot_lock = threading.Lock()
 
@@ -77,6 +84,11 @@ class ScreenshotOCRApp:
 
     def _on_screenshot_trigger(self):
         """当热键或菜单触发截图时"""
+        # 每次截图刷新主题（适应系统主题变更）
+        theme_manager.update(
+            is_dark=config_manager.is_dark_mode(),
+            accent_color=config_manager.get_system_accent_color()
+        )
         # 防止重复触发：如果已有截图会话进行中，忽略本次热键
         if not self._screenshot_lock.acquire(blocking=False):
             return
@@ -93,7 +105,7 @@ class ScreenshotOCRApp:
                     return
 
                 if action == "ocr":
-                    win = show_ocr_window(image, master=root)
+                    win = show_ocr_window(image, coords=coords, master=root)
                     win.root.bind("<Destroy>", lambda e: self._check_exit(root))
                 elif action == "pin":
                     win = show_pin_window(image, coords=coords, master=root)
@@ -117,6 +129,8 @@ class ScreenshotOCRApp:
         except Exception as e:
             print(f"截图会话出错: {e}")
         finally:
+            # 清除图标缓存（Tk 根窗口已销毁，旧 PhotoImage 引用失效）
+            icons.clear_cache()
             self._screenshot_lock.release()
 
     def _check_exit(self, root):

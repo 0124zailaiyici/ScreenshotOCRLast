@@ -5,6 +5,7 @@ import os
 import uuid
 import ctypes
 from config import config_manager
+from ui_theme import theme_manager
 
 class PinWindow:
     """钉住浮窗：无边框置顶，支持滚轮缩放和鼠标拖拽"""
@@ -30,13 +31,19 @@ class PinWindow:
         else:
             self.root = tk.Tk()
             
+        theme_manager.update(
+            is_dark=config_manager.is_dark_mode(),
+            accent_color=config_manager.get_system_accent_color()
+        )
+
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 1.0)
-        
-        # 显示图片的 Label
-        self.label = tk.Label(self.root, bd=0, bg="white")
-        self.label.pack()
+        self.root.config(bg=theme_manager.theme.border_default)
+
+        # 显示图片的 Label（主题表面色背景 + 1px 内边距露边框色）
+        self.label = tk.Label(self.root, bd=0, bg=theme_manager.theme.bg_surface)
+        self.label.pack(padx=1, pady=1)
         
         # 初始显示
         self._update_display(first_time=True)

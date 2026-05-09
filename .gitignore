@@ -31,3 +31,8 @@ tesseract_path.txt
 
 # Logs
 *.log
+
+# Claude AI working files
+.claude/
+.agents/
+skills-lock.json

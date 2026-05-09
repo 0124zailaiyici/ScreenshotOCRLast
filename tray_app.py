@@ -11,13 +11,31 @@ class TrayApp:
         self.on_screenshot = on_screenshot_callback
         self.icon = None
 
-    def _create_image(self, width=64, height=64, color1="white", color2="#0078D4"):
-        """生成默认的托盘图标 (如果没有本地文件)"""
-        image = Image.new('RGB', (width, height), color1)
+    def _create_image(self, width=64, height=64, color1=None, color2=None):
+        """生成相机形状的托盘图标，深色/浅色模式自适应"""
+        if color1 is None:
+            color1 = "#202020" if config_manager.is_dark_mode() else "white"
+        if color2 is None:
+            color2 = config_manager.get_system_accent_color()
+
+        image = Image.new('RGBA', (width, height), color1)
         dc = ImageDraw.Draw(image)
-        # 绘制一个简单的截图/相机形状
-        dc.rectangle([10, 20, 54, 50], outline=color2, width=4)
-        dc.ellipse([25, 28, 39, 42], outline=color2, width=3)
+
+        # 相机机身（圆角矩形）
+        dc.rounded_rectangle([8, 18, 56, 52], radius=8, fill=color2)
+
+        # 取景器凸起
+        dc.rectangle([22, 12, 42, 18], fill=color2)
+
+        # 外层镜头环
+        dc.ellipse([18, 24, 46, 48], fill=color1, outline=color2, width=3)
+
+        # 内层镜头
+        dc.ellipse([24, 30, 40, 42], fill=color2)
+
+        # 镜头高光反光
+        dc.ellipse([20, 26, 26, 30], fill="white")
+
         return image
 
     def _on_screenshot_click(self, icon, item):
