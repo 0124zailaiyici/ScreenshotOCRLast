@@ -40,6 +40,16 @@ class Translator:
         except:
             pass
 
+    @staticmethod
+    def _detect_language(text):
+        """本地检测文本语言：通过 Unicode 范围判断是否含中文"""
+        if not text:
+            return 'en'
+        cjk_chars = sum(1 for c in text if '一' <= c <= '鿿')
+        if cjk_chars / max(len(text), 1) > 0.2:
+            return 'zh'
+        return 'en'
+
     def translate(self, text, from_lang='auto', to_lang='zh', engine='alibaba'):
         """
         同步翻译函数
@@ -50,11 +60,20 @@ class Translator:
         """
         if not text.strip():
             return ""
-        
+
         # 严格过滤语言：仅支持中英
         if to_lang not in ['zh', 'en']:
             to_lang = 'zh' if from_lang == 'en' else 'en'
-            
+
+        # 本地语言检测：避免 API 自动检测出错
+        if from_lang == 'auto':
+            detected = self._detect_language(text)
+            if detected == to_lang:
+                # 源语言和目标语言相同，直接返回原文，无需调用 API
+                self._save_history(text, text, detected, to_lang)
+                return text
+            from_lang = detected
+
         try:
             # 自动映射通用语言代码
             res = ts.translate_text(

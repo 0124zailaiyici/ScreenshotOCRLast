@@ -1,6 +1,9 @@
 import tkinter as tk
 import sys
 import os
+import threading
+import socket
+import ctypes
 from hotkey_listener import HotkeyListener
 from tray_app import TrayApp
 from screenshot_overlay import select_region
@@ -8,21 +11,76 @@ from ocr_window import show_ocr_window
 from pin_window import show_pin_window
 from config import config_manager
 
+# Windows API Constants
+ERROR_ALREADY_EXISTS = 183
+MUTEX_NAME = "Global\\ScreenshotOCR_SingleInstance_Mutex"
+IPC_PORT = 49152  # 随机选择一个非占用端口
+
 class ScreenshotOCRApp:
     """ScreenshotOCR 主程序类"""
 
     def __init__(self):
+        self._check_single_instance()
+        # 截图会话并发锁，防止快速多次按热键创建多个 Tk 实例
+        self._screenshot_lock = threading.Lock()
+
         # 1. 初始化热键监听器
         self.hotkey = HotkeyListener(callback=self._on_screenshot_trigger)
-        
+
         # 2. 初始化系统托盘
         self.tray = TrayApp(
             on_exit_callback=self._on_exit,
             on_screenshot_callback=self._on_screenshot_trigger
         )
 
+        # 3. 启动 IPC 监听线程
+        self._start_ipc_server()
+
+    def _check_single_instance(self):
+        """使用 Mutex + IPC 双重检测单实例"""
+        self.mutex = ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX_NAME)
+        last_error = ctypes.windll.kernel32.GetLastError()
+
+        if last_error == ERROR_ALREADY_EXISTS:
+            # 尝试 IPC 连接验证旧实例是否还活着
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(2)
+                    s.connect(('127.0.0.1', IPC_PORT))
+                    s.sendall(b"screenshot")
+                print("程序已在运行，正在唤醒现有实例...")
+                sys.exit(0)
+            except Exception:
+                # IPC 连接失败 → 旧实例已死，释放残留 Mutex 后继续启动
+                ctypes.windll.kernel32.CloseHandle(self.mutex)
+                self.mutex = ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX_NAME)
+                print("检测到残留的互斥锁，已清除，继续启动...")
+
+    def _start_ipc_server(self):
+        """启动简单的本地 Socket 服务端接收指令"""
+        def server_thread():
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(('127.0.0.1', IPC_PORT))
+                    s.listen()
+                    while True:
+                        conn, addr = s.accept()
+                        with conn:
+                            data = conn.recv(1024)
+                            if data == b"screenshot":
+                                # 收到指令，触发截图
+                                self._on_screenshot_trigger()
+                except Exception as e:
+                    print(f"IPC Server 出错: {e}")
+
+        threading.Thread(target=server_thread, daemon=True).start()
+
     def _on_screenshot_trigger(self):
         """当热键或菜单触发截图时"""
+        # 防止重复触发：如果已有截图会话进行中，忽略本次热键
+        if not self._screenshot_lock.acquire(blocking=False):
+            return
+
         # 在工作线程中创建 Tk 根窗口，作为本次截图会话的生命周期管理器
         try:
             root = tk.Tk()
@@ -58,6 +116,8 @@ class ScreenshotOCRApp:
             root.mainloop()
         except Exception as e:
             print(f"截图会话出错: {e}")
+        finally:
+            self._screenshot_lock.release()
 
     def _check_exit(self, root):
         """检查是否还有活跃的 Toplevel 窗口，如果没有则销毁 root"""

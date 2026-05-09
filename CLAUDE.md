@@ -87,8 +87,6 @@ poll_result()
 | `ocr_backend` | `tesseract` | OCR 引擎 |
 | `ocr_lang` | `chi_sim+eng` | 识别语言 |
 | `tesseract_path` | `""` | Tesseract 路径（空则自动查找） |
-| `auto_copy_text` | `true` | 识字后自动复制 |
-| `auto_copy_image` | `true` | 截图后自动复制 |
 | `notification_enabled` | `true` | 托盘通知 |
 
 ## 构建

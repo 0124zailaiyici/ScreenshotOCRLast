@@ -184,9 +184,10 @@ class OcrWindow:
         ])
 
         if is_same_lang_error:
-            # 如果翻译失败是因为源语言已经是目标语言，则直接将原文存入该语言的缓存并显示
-            self.translations[target] = original_text
-            self._update_text_area(original_text, target)
+            # 如果翻译失败是因为源语言已经是目标语言，则提示用户原文已是该语言
+            hint = f"[原文已是{'中文' if target == 'zh' else '英文'}，无需翻译]\n\n{original_text}"
+            self.translations[target] = hint
+            self._update_text_area(hint, target)
         else:
             # 其他真实错误（如网络问题、API 限制）才弹出报错
             messagebox.showerror("翻译失败", err)

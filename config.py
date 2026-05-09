@@ -23,13 +23,14 @@ class ConfigManager:
     def _get_default_config(self):
         """返回默认配置项"""
         return {
-            "hotkey": "<ctrl>+<shift>+a",  # 全局截图热键
+            "hotkey": "<alt>+<shift>+s",  # 全局截图热键 (已更新为更稳定的 Alt+Shift+S)
             "ocr_backend": "tesseract",    # 默认 OCR 后端
             "ocr_lang": "chi_sim+eng",     # 识别语言：限定简中+英文
             "tesseract_path": "",          # Tesseract 可执行文件路径
             "auto_copy_text": False,       # 彻底禁用自动复制文本行为
             "auto_copy_image": False,      # 截图后不自动复制图片
-            "notification_enabled": True   # 是否开启托盘通知
+            "notification_enabled": True,  # 是否开启托盘通知
+            "pinned_items": []             # 持久化钉住的项目 [{path: str, coords: [x,y,w,h]}]
         }
 
     def load(self):
