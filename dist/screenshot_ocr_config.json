@@ -1,0 +1,10 @@
+{
+    "hotkey": "<alt>+x",
+    "ocr_backend": "tesseract",
+    "ocr_lang": "chi_sim+eng",
+    "tesseract_path": "",
+    "auto_copy_text": false,
+    "auto_copy_image": false,
+    "notification_enabled": true,
+    "pinned_items": []
+}
