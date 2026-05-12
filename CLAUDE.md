@@ -85,7 +85,7 @@ poll_result()
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
-| `hotkey` | `<ctrl>+<shift>+s` | 全局快捷键 |
+| `hotkey` | `f1` | 全局快捷键 |
 | `ocr_backend` | `tesseract` | OCR 引擎 |
 | `ocr_lang` | `chi_sim+eng` | 识别语言 |
 | `tesseract_path` | `""` | Tesseract 路径（空则自动查找） |

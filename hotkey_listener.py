@@ -1,14 +1,18 @@
 import ctypes
 import threading
 import time
-from ctypes import wintypes
 
 user32 = ctypes.windll.user32
-VK_CONTROL = 0x11
-VK_SHIFT = 0x10
-VK_MENU = 0x12  # Alt
-VK_LWIN = 0x5B
-VK_RWIN = 0x5C
+
+VK_CODES = {
+    'ctrl': 0x11,
+    'shift': 0x10,
+    'alt': 0x12,
+    'win': 0x5B,
+    'f1': 0x70, 'f2': 0x71, 'f3': 0x72, 'f4': 0x73,
+    'f5': 0x74, 'f6': 0x75, 'f7': 0x76, 'f8': 0x77,
+    'f9': 0x78, 'f10': 0x79, 'f11': 0x7A, 'f12': 0x7B,
+}
 
 
 class HotkeyListener:
@@ -26,14 +30,10 @@ class HotkeyListener:
         modifiers = set()
         key_char = None
         for part in parts:
-            if part == '<ctrl>':
-                modifiers.add('ctrl')
-            elif part == '<shift>':
-                modifiers.add('shift')
-            elif part == '<alt>':
-                modifiers.add('alt')
-            elif part == '<win>':
-                modifiers.add('win')
+            if part in ('ctrl', 'shift', 'alt', 'win'):
+                modifiers.add(part)
+            elif part.startswith('f') and part[1:].isdigit():
+                key_char = part.lower()
             elif len(part) == 1:
                 key_char = part.upper()
         return modifiers, key_char
@@ -42,23 +42,12 @@ class HotkeyListener:
         return bool(user32.GetAsyncKeyState(vk) & 0x8000)
 
     def _run(self, hotkey_str):
-        mod_codes = []
-        char_code = 0
-
         target_mods, target_char = self._parse_hotkey(hotkey_str)
-        if not target_mods and not target_char:
+        if not target_char:
             return
 
-        if 'ctrl' in target_mods:
-            mod_codes.append(VK_CONTROL)
-        if 'shift' in target_mods:
-            mod_codes.append(VK_SHIFT)
-        if 'alt' in target_mods:
-            mod_codes.append(VK_MENU)
-        if 'win' in target_mods:
-            mod_codes.append(VK_LWIN)
-        if target_char:
-            char_code = ord(target_char)
+        mod_codes = [VK_CODES[m] for m in target_mods if m in VK_CODES]
+        char_code = VK_CODES.get(target_char.lower(), ord(target_char.upper()) if len(target_char) == 1 else 0)
 
         self._running = True
         self._current_hotkey = hotkey_str
@@ -75,23 +64,13 @@ class HotkeyListener:
                     time.sleep(0.15)
             else:
                 was_pressed = False
-
             time.sleep(0.05)
 
-    def start(self, hotkey_str="<ctrl>+<shift>+s"):
+    def start(self, hotkey_str="f1"):
         if self._running:
             self.stop()
-
-        target_mods, target_char = self._parse_hotkey(hotkey_str)
-        if not target_mods and not target_char:
-            return
-
         self._running = True
-        self._thread = threading.Thread(
-            target=self._run,
-            args=(hotkey_str,),
-            daemon=True
-        )
+        self._thread = threading.Thread(target=self._run, args=(hotkey_str,), daemon=True)
         self._thread.start()
 
     def stop(self):
