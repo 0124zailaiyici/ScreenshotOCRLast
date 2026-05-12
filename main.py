@@ -106,7 +106,6 @@ class ScreenshotOCRApp:
         except Exception as e:
             print(f"钉住 Tk 线程退出: {e}")
 
-# ---- 已弃用 —— _screenshot_lock 等属性保留供旧代码引用 ----
 
     def _on_screenshot_trigger(self):
         if not self._screenshot_lock.acquire(blocking=False):
