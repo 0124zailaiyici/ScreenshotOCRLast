@@ -25,7 +25,7 @@ class ConfigManager:
     def _get_default_config(self):
         """返回默认配置项"""
         return {
-            "hotkey": "f1",  # 全局截图热键
+            "hotkey": "<alt>+x",  # 全局截图热键
             "ocr_backend": "tesseract",    # 默认 OCR 后端
             "ocr_lang": "chi_sim+eng",     # 识别语言：限定简中+英文
             "tesseract_path": "",          # Tesseract 可执行文件路径

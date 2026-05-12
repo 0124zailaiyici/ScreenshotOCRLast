@@ -199,7 +199,7 @@ class ScreenshotOCRApp:
     def run(self):
         self._restore_pinned_windows()
         self.hotkey.start(config_manager.get("hotkey"))
-        print("ScreenshotOCR 已常驻系统托盘 (F1 触发)")
+        print("ScreenshotOCR 已常驻系统托盘 (Alt+X 触发)")
         self.tray.run()
 
 

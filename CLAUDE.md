@@ -1,6 +1,6 @@
 # ScreenshotOCR
 
-Windows 截图工具，支持截图后三选一操作：钉住到屏幕、OCR 识别文字、复制图片。常驻系统托盘，`Ctrl+Shift+S` 全局热键触发。
+Windows 截图工具，支持截图后三选一操作：钉住到屏幕、OCR 识别文字、复制图片。常驻系统托盘，`Alt+X` 全局热键触发。
 
 ## 技术栈
 
@@ -85,7 +85,7 @@ poll_result()
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
-| `hotkey` | `f1` | 全局快捷键 |
+| `hotkey` | `<alt>+x` | 全局快捷键 |
 | `ocr_backend` | `tesseract` | OCR 引擎 |
 | `ocr_lang` | `chi_sim+eng` | 识别语言 |
 | `tesseract_path` | `""` | Tesseract 路径（空则自动查找） |
