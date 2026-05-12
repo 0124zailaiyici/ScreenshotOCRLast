@@ -57,7 +57,7 @@ class TrayApp:
     def run(self):
         """运行托盘主循环"""
         menu = pystray.Menu(
-            pystray.MenuItem("立即截图 (Ctrl+Shift+A)", self._on_screenshot_click),
+            pystray.MenuItem("立即截图 (Ctrl+Shift+S)", self._on_screenshot_click),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", self._on_exit_click)
         )

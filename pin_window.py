@@ -94,8 +94,6 @@ class PinWindow:
         if not os.path.exists(img_path):
             self.original_image.save(img_path)
             
-        pinned_items = config_manager.get("pinned_items") or []
-        # 更新或添加
         item_data = {
             "id": self.pin_id,
             "path": img_path,
@@ -103,21 +101,21 @@ class PinWindow:
             "scale": self.current_scale,
             "pos": [self.root.winfo_x(), self.root.winfo_y()]
         }
-        
-        # 过滤掉旧的同 ID 项
+
+        pinned_items = config_manager.get_pinned_items()
         new_items = [i for i in pinned_items if i.get("id") != self.pin_id]
         new_items.append(item_data)
-        config_manager.set("pinned_items", new_items)
+        config_manager.set_pinned_items(new_items)
 
     def _on_close(self, event=None):
         """关闭窗口并从活跃列表中移除，同时清理持久化数据"""
         if self in PinWindow.active_windows:
             PinWindow.active_windows.remove(self)
-            
-        # 清理配置
-        pinned_items = config_manager.get("pinned_items") or []
+
+        # 清理配置（线程安全）
+        pinned_items = config_manager.get_pinned_items()
         new_items = [i for i in pinned_items if i.get("id") != self.pin_id]
-        config_manager.set("pinned_items", new_items)
+        config_manager.set_pinned_items(new_items)
         
         # 清理文件
         img_path = os.path.join(config_manager.base_path, "assets", "pinned", f"{self.pin_id}.png")
@@ -151,8 +149,7 @@ class PinWindow:
 
     def _apply_initial_position(self, width, height):
         # 1. 如果是恢复的窗口，直接使用保存的位置
-        pinned_items = config_manager.get("pinned_items") or []
-        for item in pinned_items:
+        for item in config_manager.get_pinned_items():
             if item.get("id") == self.pin_id and "pos" in item:
                 self.root.geometry(f"{width}x{height}+{item['pos'][0]}+{item['pos'][1]}")
                 return
@@ -210,15 +207,14 @@ def show_pin_window(image, coords=None, master=None, pin_id=None, scale=1.0):
 
 def restore_pinned_windows(master=None):
     """从配置中恢复所有钉住的窗口"""
-    items = config_manager.get("pinned_items") or []
-    for item in items:
+    for item in config_manager.get_pinned_items():
         try:
             if os.path.exists(item["path"]):
                 img = Image.open(item["path"])
                 show_pin_window(
-                    img, 
-                    coords=item.get("coords"), 
-                    master=master, 
+                    img,
+                    coords=item.get("coords"),
+                    master=master,
                     pin_id=item["id"],
                     scale=item.get("scale", 1.0)
                 )

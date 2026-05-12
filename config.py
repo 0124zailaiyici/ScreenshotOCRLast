@@ -2,20 +2,22 @@ import json
 import os
 import sys
 import winreg
+import threading
 
 # 默认配置文件名
 CONFIG_FILE = "screenshot_ocr_config.json"
 
 class ConfigManager:
     """配置管理器：负责读取和保存用户设置"""
-    
+
     def __init__(self):
+        self._lock = threading.Lock()
         # 获取程序运行目录，兼容源码运行和 PyInstaller 打包后的路径
         if getattr(sys, 'frozen', False):
             self.base_path = os.path.dirname(sys.executable)
         else:
             self.base_path = os.path.dirname(os.path.abspath(__file__))
-            
+
         self.config_path = os.path.join(self.base_path, CONFIG_FILE)
         self.config = self._get_default_config()
         self.load()
@@ -23,7 +25,7 @@ class ConfigManager:
     def _get_default_config(self):
         """返回默认配置项"""
         return {
-            "hotkey": "<alt>+<shift>+s",  # 全局截图热键 (已更新为更稳定的 Alt+Shift+S)
+            "hotkey": "<ctrl>+<shift>+s",  # 全局截图热键
             "ocr_backend": "tesseract",    # 默认 OCR 后端
             "ocr_lang": "chi_sim+eng",     # 识别语言：限定简中+英文
             "tesseract_path": "",          # Tesseract 可执行文件路径
@@ -58,9 +60,21 @@ class ConfigManager:
         return self.config.get(key)
 
     def set(self, key, value):
-        """设置并保存配置项"""
-        self.config[key] = value
-        self.save()
+        """设置并保存配置项（线程安全）"""
+        with self._lock:
+            self.config[key] = value
+            self.save()
+
+    def get_pinned_items(self):
+        """线程安全地获取钉住窗口列表"""
+        with self._lock:
+            return list(self.config.get("pinned_items") or [])
+
+    def set_pinned_items(self, items):
+        """线程安全地设置钉住窗口列表"""
+        with self._lock:
+            self.config["pinned_items"] = items
+            self.save()
 
     def get_system_accent_color(self):
         """获取 Windows 系统主题色 (Accent Color)"""

@@ -18,7 +18,6 @@ def build():
 
         # 强制包含的关键动态库
         '--hidden-import=pystray',
-        '--hidden-import=pynput',
         '--hidden-import=pytesseract',
         '--hidden-import=win32clipboard',
         '--hidden-import=translators',

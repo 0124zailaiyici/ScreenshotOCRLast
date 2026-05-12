@@ -124,7 +124,7 @@ class IconButton(tk.Label):
 ## 7. 响应式与无障碍细则
 
 - **DPI 适配**: 调用 `ctypes.windll.shcore.SetProcessDpiAwareness(1)` 确保 UI 在 125%/150% 缩放不模糊。
-- **快捷键**: `Ctrl+Shift+A` (截图), `Esc` (退出截图), `Ctrl+C` (OCR 窗口内复制)。
+- **快捷键**: `Ctrl+Shift+S` (截图), `Esc` (退出截图), `Ctrl+C` (OCR 窗口内复制)。
 - **高对比度**: 选区边框必须在深浅色背景下均可见 (双色描边)。
 
 ---
