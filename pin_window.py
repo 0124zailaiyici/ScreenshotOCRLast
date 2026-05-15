@@ -87,7 +87,7 @@ class PinWindow:
         if not self.pin_id: return
         
         # 确保目录存在
-        save_dir = os.path.join(config_manager.base_path, "assets", "pinned")
+        save_dir = os.path.join(config_manager.data_dir, "pinned")
         os.makedirs(save_dir, exist_ok=True)
         
         img_path = os.path.join(save_dir, f"{self.pin_id}.png")
@@ -118,7 +118,7 @@ class PinWindow:
         config_manager.set_pinned_items(new_items)
         
         # 清理文件
-        img_path = os.path.join(config_manager.base_path, "assets", "pinned", f"{self.pin_id}.png")
+        img_path = os.path.join(config_manager.data_dir, "pinned", f"{self.pin_id}.png")
         if os.path.exists(img_path):
             try: os.remove(img_path)
             except: pass

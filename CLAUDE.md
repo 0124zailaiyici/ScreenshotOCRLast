@@ -31,7 +31,7 @@ Windows 截图工具，支持截图后三选一操作：钉住到屏幕、OCR �
 - **Tkinter 线程安全**：所有 Tkinter 调用必须在创建该窗口的线程中执行。OCR 和翻译在后台线程运行，通过 `result` dict + 主线程 `after()` 轮询模式取回结果。
 - **持久化 Tk 线程**：main.py 在 `_pin_loop` 中创建唯一一个隐藏的 Tk 主循环，专门用于显示钉住窗口。截图覆盖层和 OCR 窗口使用临时 Toplevel 作为会话容器。
 - **跨线程通信**：后台线程只写普通 Python dict，主线程每 200ms 轮询检测变化。严禁后台线程调用 `win.after()`、`win.winfo_exists()` 等 Tkinter 函数。
-- **配置路径**：exe 模式下配置文件在 exe 同级目录 (`sys.executable`)，源码模式下在项目根目录 (`__file__`)。
+- **配置路径**：exe 模式下配置文件在 `%APPDATA%/ScreenshotOCR/` 目录下，exe 可随意移动位置。
 
 ## 目录结构
 

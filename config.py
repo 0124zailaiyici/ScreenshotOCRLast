@@ -12,13 +12,20 @@ class ConfigManager:
 
     def __init__(self):
         self._lock = threading.Lock()
-        # 获取程序运行目录，兼容源码运行和 PyInstaller 打包后的路径
+        # exe 所在目录（用于钉住图片等本地资源）
         if getattr(sys, 'frozen', False):
             self.base_path = os.path.dirname(sys.executable)
         else:
             self.base_path = os.path.dirname(os.path.abspath(__file__))
 
-        self.config_path = os.path.join(self.base_path, CONFIG_FILE)
+        # 配置文件固定存到 %APPDATA%，exe 移动到任何位置都不影响
+        appdata = os.environ.get('APPDATA', self.base_path)
+        self.config_dir = os.path.join(appdata, "ScreenshotOCR")
+        os.makedirs(self.config_dir, exist_ok=True)
+        self.config_path = os.path.join(self.config_dir, CONFIG_FILE)
+        # 钉住图片等数据也存到同一目录
+        self.data_dir = os.path.join(self.config_dir, "data")
+        os.makedirs(self.data_dir, exist_ok=True)
         self.config = self._get_default_config()
         self.load()
 
