@@ -7,7 +7,8 @@ Windows 截图工具，支持截图后三选一操作：钉住到屏幕、OCR �
 - Python 3.10+, **无外部 GUI 框架**，纯 Tkinter 做 GUI
 - **pystray** 系统托盘
 - **Pillow** 图像处理
-- **pywin32** Windows 剪贴板操作 + 全局热键（GetAsyncKeyState 轮询）
+- **pywin32** Windows 剪贴板操作
+- **pynput** 全局热键（非注册表方式）
 - **pytesseract** OCR 识别（需独立安装 Tesseract-OCR 5.x）
 - **translators** 中英翻译
 - **PyInstaller** 打包为单文件 exe
@@ -16,7 +17,7 @@ Windows 截图工具，支持截图后三选一操作：钉住到屏幕、OCR �
 
 ```
 用户按热键
-  → hotkey_listener.py (WH_KEYBOARD_LL 低层键盘钩子 → 工作线程)
+  → hotkey_listener.py (pynput 全局热键 → 放入 queue)
   → main.py (_on_screenshot_trigger → 放入持久化 Tk 线程队列)
     → screenshot_overlay.py (全屏覆盖层，拖拽选区域)
       → 浮动工具栏 [钉住|识字|复制]
@@ -47,7 +48,7 @@ Windows 截图工具，支持截图后三选一操作：钉住到屏幕、OCR �
 │   ├── base.py               # OcrBackend 抽象基类
 │   └── tesseract_backend.py  # Tesseract 后端 (含图像预处理)
 ├── clipboard_manager.py      # 剪贴板 (pywin32 CF_DIB/CF_UNICODETEXT)
-├── hotkey_listener.py        # 全局热键 (WH_KEYBOARD_LL 低层键盘钩子)
+├── hotkey_listener.py        # 全局热键 (pynput)
 ├── tray_app.py               # 系统托盘 (pystray)
 ├── ui_theme.py               # 主题系统（深色/浅色 + AccentColor）
 ├── ui_icons.py               # 图标缓存管理器 (PIL 程序化生成)
@@ -130,4 +131,4 @@ translators>=5.0.0   # 多引擎翻译
 - **Tesseract 预处理**：`tesseract_backend.py` 对小图自动放大，转灰度 + 对比度拉伸 + 锐化以提高识别率。
 - **translators 超时**：`translator.py` 设 `timeout=15` 防止网络卡死。
 - **PyInstaller hidden imports**：`pytesseract`、`translators`、`PIL.ImageTk` 等库动态导入，需要显式 `--hidden-import`。
-- **热键兼容性**：使用 `WH_KEYBOARD_LL` 低层键盘钩子实现全局热键，兼容无管理员权限的受限环境。
+- **热键兼容性**：使用 pynput 库实现全局热键，兼容无管理员权限的受限环境。
