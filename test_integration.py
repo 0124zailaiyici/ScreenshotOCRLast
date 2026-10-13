@@ -116,34 +116,50 @@ def test_translate_result_is_cached(tk_root, stub_ocr, monkeypatch):
         win.root.destroy()
 
 
-def test_icon_cache_invalidates_when_root_changes(tk_root):
-    """回归防护：PhotoImage 隶属于创建它的 Tk 解释器。
+def test_icon_cache_is_keyed_on_the_calling_widget_root():
+    """回归防护：图标缓存必须跟随**调用方控件所属的 root** 失效。
 
     旧实现用 ``tkinter._default_root`` 判断「root 是否变了」，但该变量只在
-    它为 None 时才被新 root 覆盖。因此在「第一个 root 仍存活时又建了第二个
-    root」的情形下它不会变化，缓存不会失效，旧句柄被配置给新解释器的控件
-    就会抛 ``TclError: image "pyimageN" doesn't exist``。
+    它为 None 时才被新 root 覆盖。两个 root 并存时它不会变化，缓存不会失效，
+    旧句柄被配置给新解释器的控件就会抛
+    ``TclError: image "pyimageN" doesn't exist``。
 
-    这里刻意让两个 root 同时存活（并让会话级 tk_root 占住 _default_root），
-    以覆盖旧实现识别不出的那条路径。
+    这里刻意**不创建真实 Tk 解释器**：同一进程内并存 3 个以上解释器会让 Tcl
+    找不到 init.tcl（实测不稳定），测试本身必须保持确定性。
     """
+    from ui_icons import IconProvider
+
+    class FakeWidget:
+        """_sync 只需要控件能报出自己所属的 root"""
+
+        def __init__(self, root):
+            self._root_obj = root
+
+        def _root(self):
+            return self._root_obj
+
+    provider = IconProvider()
+    root_a, root_b = object(), object()
+
+    provider._cache_root = root_a
+    provider._cache[("pin", "#000000")] = "cached-for-a"
+
+    # 同一个 root：缓存必须保留，否则每次取图标都要重画
+    assert provider._sync(FakeWidget(root_a)) is root_a
+    assert provider._cache == {("pin", "#000000"): "cached-for-a"}
+
+    # root 变化：缓存必须清空，绝不能把失效句柄交给新解释器
+    assert provider._sync(FakeWidget(root_b)) is root_b
+    assert provider._cache == {}
+    assert provider._cache_root is root_b
+
+
+def test_icon_sync_requires_a_root(monkeypatch):
+    """没有任何 Tk root 时必须给出明确错误，而不是让 PIL 抛难懂的异常"""
     import tkinter
 
     from ui_icons import IconProvider
 
-    provider = IconProvider()
-
-    root_a = tkinter.Tk()
-    root_a.withdraw()
-    root_b = tkinter.Tk()
-    root_b.withdraw()
-    try:
-        image_a = provider.get_pin("#0078D4", master=root_a)
-        assert provider._cache_root is root_a
-
-        image_b = provider.get_pin("#0078D4", master=root_b)
-        assert provider._cache_root is root_b
-        assert image_b is not image_a, "两个 root 并存时仍复用了失效句柄"
-    finally:
-        root_b.destroy()
-        root_a.destroy()
+    monkeypatch.setattr(tkinter, "_default_root", None)
+    with pytest.raises(RuntimeError):
+        IconProvider()._sync(None)

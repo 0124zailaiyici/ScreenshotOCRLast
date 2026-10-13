@@ -143,7 +143,7 @@ pytest>=7.0.0        # 单元测试框架
 ## 测试与验证
 
 ```bash
-pytest test_app.py test_integration.py test_pin_logic.py   # 27 个用例
+pytest test_app.py test_integration.py test_pin_logic.py   # 28 个用例
 python verify_app.py                                       # 环境自检，失败返回非零退出码
 ```
 
@@ -156,6 +156,7 @@ python verify_app.py                                       # 环境自检，失�
 ## 已知注意事项
 
 - **DPI 感知**：`main.py` 在 import 任何 GUI 模块前调用 `SetProcessDPIAware()`，确保选区坐标与像素匹配。
+- **同一进程内不要并存 3 个以上 Tk 解释器**：实测会让 Tcl 找不到自己的库，抛 `TclError: Can't find a usable init.tcl`，且是否触发不稳定（会表现为偶发失败）。因此测试里**不要**为了验证「两个 root 并存」而真的 `tk.Tk()` 建多个解释器 —— 用带 `_root()` 方法的假控件直接测 `IconProvider._sync`（见 `test_integration.py::test_icon_cache_is_keyed_on_the_calling_widget_root`）。
 - **Tesseract 预处理**：`ocr_engine.TesseractBackend._preprocess` 对小图自动放大，转灰度 + 对比度拉伸 + 锐化以提高识别率。该方法与识别引擎解耦，可在未安装 Tesseract 时单独测试。
 - **translators 超时**：`translator.py` 设 `timeout=15` 防止网络卡死。
 - **PyInstaller hidden imports**：`pytesseract`、`translators`、`PIL.ImageTk` 等库动态导入，需要显式 `--hidden-import`。
