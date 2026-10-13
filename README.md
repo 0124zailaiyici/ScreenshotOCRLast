@@ -60,7 +60,11 @@ python build_exe.py
 打包完成后，你可以在 `dist/` 目录下找到 `ScreenshotOCR.exe`。将它复制到桌面即可。
 3. **运行测试**：
    ```bash
-   pytest test_app.py
+   pytest test_app.py test_integration.py test_pin_logic.py
+   ```
+   另可运行环境自检（失败返回非零退出码）：
+   ```bash
+   python verify_app.py
    ```
 
 ## 4. API 与模块说明
@@ -85,6 +89,17 @@ python build_exe.py
 本项目采用 [MIT License](LICENSE) 开源许可证。
 
 ## 7. 更新日志 (Changelog)
+
+### [v1.2.2] - 2026-10-13
+
+- **\[Fix]** 修复 Tk root 变化后图标缓存失效导致的 `TclError: image "pyimageN" doesn't exist`（缓存现在随 root 自动失效）
+- **\[Fix]** 修复 OCR 识别失败被伪装成识别结果的问题，改为抛出 `OcrError` 并展示修复引导
+- **\[Fix]** 修复钉住窗口的置顶定时器在关闭后不取消（每 2 秒空转的泄漏）
+- **\[Fix]** 修复截图会话锁异常时不释放导致热键永久失效（新增 30s 超时强制回收）
+- **\[Fix]** 修复翻译历史写在当前工作目录的问题，迁移到 `%APPDATA%/ScreenshotOCR/`，旧数据自动迁移
+- **\[Fix]** 修复配置项被写坏类型时运行期崩溃，加载时按 schema 校验并回落默认值
+- **\[Test]** 测试由 7 failed / 5 passed 修复为 23 passed；新增 hermetic 夹具，不再读写用户真实配置
+- **\[Build]** `verify_app.py` 由硬编码假验证改为 13 项真实检查，失败返回非零退出码
 
 ### [v1.2.1] - 2026-05-09
 
