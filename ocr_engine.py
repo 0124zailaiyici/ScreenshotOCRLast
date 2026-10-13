@@ -1,7 +1,25 @@
 import pytesseract
-from PIL import Image, ImageOps, ImageFilter, ImageEnhance
+from PIL import Image, ImageFilter, ImageEnhance
 import os
 from config import config_manager
+
+
+class OcrError(RuntimeError):
+    """OCR 识别失败。
+
+    识别失败必须向上抛出，由调用方展示给用户；绝不能被伪装成
+    一个形如 "识别失败: ..." 的字符串混进识别结果里。
+
+    :param kind: 失败类别，供调用方选择对应的修复引导
+        - ``"not_found"``: 找不到 Tesseract 可执行文件
+        - ``"lang_pack"``: 缺少识别语言包
+        - ``"other"``:     其它
+    """
+
+    def __init__(self, message, kind="other"):
+        super().__init__(message)
+        self.kind = kind
+
 
 class OcrBackend:
     """OCR 后端抽象基类"""
@@ -50,31 +68,50 @@ class TesseractBackend(OcrBackend):
         except Exception:
             return False
 
+    @staticmethod
+    def _preprocess(image: Image.Image) -> Image.Image:
+        """图像预处理：灰度 → 小图放大 → 对比度拉伸 → 锐化
+
+        与识别引擎解耦，便于在未安装 Tesseract 的环境中单独测试。
+        """
+        processed = image.convert('L')
+
+        # 自动放大：针对小图提高识别率
+        w, h = processed.size
+        if w < 1000 or h < 1000:
+            processed = processed.resize((w * 2, h * 2), Image.Resampling.LANCZOS)
+
+        # 增强对比度
+        processed = ImageEnhance.Contrast(processed).enhance(2.0)
+
+        # 锐化
+        return processed.filter(ImageFilter.SHARPEN)
+
+    @staticmethod
+    def _classify_error(exc) -> str:
+        """把底层异常归类，供 UI 选择对应的修复引导"""
+        name = type(exc).__name__.lower()
+        text = str(exc).lower()
+        if "tesseractnotfound" in name or "not installed" in text or "not in your path" in text:
+            return "not_found"
+        if ("failed loading language" in text or "tessdata" in text
+                or "error opening data file" in text):
+            return "lang_pack"
+        return "other"
+
     def recognize(self, image: Image.Image) -> str:
-        """识别图片中的文字，包含预处理逻辑"""
+        """识别图片中的文字
+
+        :raises OcrError: 识别过程失败（引擎缺失、语言包缺失等）
+        """
         try:
-            # 1. 图像预处理：转灰度
-            processed_img = image.convert('L')
-            
-            # 2. 自动放大：针对小图提高识别率
-            w, h = processed_img.size
-            if w < 1000 or h < 1000:
-                processed_img = processed_img.resize((w*2, h*2), Image.Resampling.LANCZOS)
-
-            # 3. 增强对比度
-            enhancer = ImageEnhance.Contrast(processed_img)
-            processed_img = enhancer.enhance(2.0)
-            
-            # 4. 锐化
-            processed_img = processed_img.filter(ImageFilter.SHARPEN)
-
-            # 5. 调用 pytesseract
+            processed_img = self._preprocess(image)
             lang = config_manager.get("ocr_lang") or "chi_sim+eng"
-            text = pytesseract.image_to_string(processed_img, lang=lang)
-            return text.strip()
+            return pytesseract.image_to_string(processed_img, lang=lang).strip()
         except Exception as e:
-            print(f"Tesseract 识别出错: {e}")
-            return f"识别失败: {str(e)}"
+            raise OcrError(
+                f"Tesseract 识别出错: {e}", kind=self._classify_error(e)
+            ) from e
 
     @property
     def name(self) -> str:

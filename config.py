@@ -8,9 +8,25 @@ import threading
 CONFIG_FILE = "screenshot_ocr_config.json"
 
 class ConfigManager:
-    """配置管理器：负责读取和保存用户设置"""
+    """配置管理器：负责读取和保存用户设置
 
-    def __init__(self):
+    :param config_dir: 显式指定配置目录。默认使用 %APPDATA%/ScreenshotOCR。
+                       显式传入可让测试完全隔离，不触碰用户真实配置。
+    """
+
+    # 各配置项的期望类型，用于加载时丢弃被写坏的条目
+    _SCHEMA = {
+        "hotkey": str,
+        "ocr_backend": str,
+        "ocr_lang": str,
+        "tesseract_path": str,
+        "auto_copy_text": bool,
+        "auto_copy_image": bool,
+        "notification_enabled": bool,
+        "pinned_items": list,
+    }
+
+    def __init__(self, config_dir=None):
         self._lock = threading.Lock()
         # exe 所在目录（用于钉住图片等本地资源）
         if getattr(sys, 'frozen', False):
@@ -19,8 +35,10 @@ class ConfigManager:
             self.base_path = os.path.dirname(os.path.abspath(__file__))
 
         # 配置文件固定存到 %APPDATA%，exe 移动到任何位置都不影响
-        appdata = os.environ.get('APPDATA', self.base_path)
-        self.config_dir = os.path.join(appdata, "ScreenshotOCR")
+        if config_dir is None:
+            appdata = os.environ.get('APPDATA', self.base_path)
+            config_dir = os.path.join(appdata, "ScreenshotOCR")
+        self.config_dir = config_dir
         os.makedirs(self.config_dir, exist_ok=True)
         self.config_path = os.path.join(self.config_dir, CONFIG_FILE)
         # 钉住图片等数据也存到同一目录
@@ -42,13 +60,30 @@ class ConfigManager:
             "pinned_items": []             # 持久化钉住的项目 [{path: str, coords: [x,y,w,h]}]
         }
 
+    def _sanitize(self, user_config):
+        """丢弃类型不符的配置项，避免脏配置在运行期引发崩溃"""
+        clean = {}
+        for key, value in user_config.items():
+            expected = self._SCHEMA.get(key)
+            if expected is None:
+                clean[key] = value          # 未知键原样保留，向后兼容
+            elif expected is bool:
+                if isinstance(value, bool):
+                    clean[key] = value
+            elif isinstance(value, expected):
+                clean[key] = value
+        return clean
+
     def load(self):
         """从 JSON 文件加载配置"""
         try:
             if os.path.exists(self.config_path):
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     user_config = json.load(f)
-                    self.config.update(user_config)
+                if not isinstance(user_config, dict):
+                    print(f"配置格式错误（期望 JSON 对象）: {type(user_config).__name__}")
+                    return
+                self.config.update(self._sanitize(user_config))
             else:
                 self.save()  # 文件不存在则创建默认配置
         except Exception as e:
@@ -67,15 +102,30 @@ class ConfigManager:
         return self.config.get(key)
 
     def set(self, key, value):
-        """设置并保存配置项（线程安全）"""
+        """设置并保存配置项（线程安全）
+
+        与 load() 一致地做类型校验：已知键收到类型不符的值时拒绝写入，
+        避免脏值在运行期引发崩溃。未知键不做限制。
+        """
         with self._lock:
+            expected = self._SCHEMA.get(key)
+            if expected is not None:
+                if expected is bool:
+                    ok = isinstance(value, bool)
+                else:
+                    ok = isinstance(value, expected)
+                if not ok:
+                    print(f"配置 {key} 期望 {expected.__name__}，"
+                          f"收到 {type(value).__name__}，已拒绝写入")
+                    return
             self.config[key] = value
             self.save()
 
     def get_pinned_items(self):
         """线程安全地获取钉住窗口列表"""
         with self._lock:
-            return list(self.config.get("pinned_items") or [])
+            items = self.config.get("pinned_items")
+            return list(items) if isinstance(items, list) else []
 
     def set_pinned_items(self, items):
         """线程安全地设置钉住窗口列表"""

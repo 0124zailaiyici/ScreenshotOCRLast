@@ -59,6 +59,7 @@ class PinWindow:
         self.root.bind("<Escape>", self._on_close)
         
         # 强制置顶定时器 (防止被其他 TOPMOST 窗口覆盖)
+        self._topmost_job = None
         self._ensure_topmost()
 
         # 拖拽相关
@@ -78,7 +79,7 @@ class PinWindow:
                 parent_hwnd = ctypes.windll.user32.GetParent(hwnd)
                 target_hwnd = parent_hwnd if parent_hwnd else hwnd
                 ctypes.windll.user32.SetWindowPos(target_hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002)
-                self.root.after(2000, self._ensure_topmost)
+                self._topmost_job = self.root.after(2000, self._ensure_topmost)
         except Exception:
             pass
 
@@ -112,6 +113,14 @@ class PinWindow:
         if self in PinWindow.active_windows:
             PinWindow.active_windows.remove(self)
 
+        # 取消置顶定时器，避免窗口销毁后回调仍被反复触发
+        if self._topmost_job is not None:
+            try:
+                self.root.after_cancel(self._topmost_job)
+            except Exception:
+                pass
+            self._topmost_job = None
+
         # 清理配置（线程安全）
         pinned_items = config_manager.get_pinned_items()
         new_items = [i for i in pinned_items if i.get("id") != self.pin_id]
@@ -135,7 +144,8 @@ class PinWindow:
         if new_w < 20 or new_h < 20: return
             
         resized_img = self.original_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        self.tk_image = ImageTk.PhotoImage(resized_img)
+        # 显式绑定到本窗口所属的 Tk root，避免依赖全局默认 root 导致句柄错配
+        self.tk_image = ImageTk.PhotoImage(resized_img, master=self.root)
         self.label.config(image=self.tk_image)
         
         if first_time:

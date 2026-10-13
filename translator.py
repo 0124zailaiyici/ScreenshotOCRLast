@@ -2,23 +2,60 @@ import translators as ts
 import threading
 import json
 import os
+import shutil
 from datetime import datetime
+
+from config import config_manager
+
 
 class Translator:
     """翻译模块：封装多引擎翻译逻辑，支持自动检测、历史记录及错误处理"""
 
-    def __init__(self, timeout=15):
+    def __init__(self, timeout=15, history_file=None):
         self.timeout = timeout
-        self.history_file = "translation_history.json"
+        # 历史记录与配置同目录（%APPDATA%/ScreenshotOCR），
+        # 不再依赖当前工作目录，避免 exe 从任意位置启动时写错地方或静默失败
+        if history_file is None:
+            history_file = os.path.join(config_manager.config_dir, "translation_history.json")
+        self.history_file = history_file
         self._load_history()
+
+    def migrate_legacy_history(self):
+        """把旧版写在当前工作目录的历史记录迁移到配置目录。
+
+        必须由启动流程**显式调用**，不要在模块导入期执行文件复制 ——
+        否则任何 ``import translator``（测试、自检、IDE 索引）都会产生副作用。
+
+        :return: 是否发生了迁移
+        """
+        if os.path.exists(self.history_file):
+            return False
+
+        # 旧实现把历史写在当前工作目录，因此 CWD 与程序目录都可能是遗留位置
+        candidates = [
+            os.path.join(config_manager.base_path, "translation_history.json"),
+            os.path.join(os.getcwd(), "translation_history.json"),
+        ]
+        for legacy in dict.fromkeys(candidates):
+            if os.path.exists(legacy):
+                try:
+                    shutil.copyfile(legacy, self.history_file)
+                    print(f"已迁移翻译历史: {legacy} -> {self.history_file}")
+                    self._load_history()
+                    return True
+                except Exception as e:
+                    print(f"迁移翻译历史失败: {e}")
+        return False
 
     def _load_history(self):
         """从本地加载翻译历史"""
         if os.path.exists(self.history_file):
             try:
                 with open(self.history_file, 'r', encoding='utf-8') as f:
-                    self.history = json.load(f)
-            except:
+                    data = json.load(f)
+                self.history = data if isinstance(data, list) else []
+            except Exception as e:
+                print(f"读取翻译历史失败: {e}")
                 self.history = []
         else:
             self.history = []
@@ -37,8 +74,8 @@ class Translator:
         try:
             with open(self.history_file, 'w', encoding='utf-8') as f:
                 json.dump(self.history, f, indent=4, ensure_ascii=False)
-        except:
-            pass
+        except Exception as e:
+            print(f"写入翻译历史失败: {e}")
 
     @staticmethod
     def _detect_language(text):

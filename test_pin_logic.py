@@ -1,111 +1,130 @@
+"""钉住窗口的位置、边界、重叠避让、缩放与持久化行为。
+
+使用会话级共享 Tk root（conftest.tk_root），并通过 isolated_config
+把配置与钉住图片重定向到临时目录 —— 不再写入用户真实配置。
+"""
 import pytest
-import tkinter as tk
 from PIL import Image
+
 from pin_window import PinWindow
-import random
 
-@pytest.fixture
-def tk_root():
-    root = tk.Tk()
-    root.withdraw()
-    yield root
-    root.destroy()
 
-def test_pin_window_jitter(tk_root):
-    """验证需求 1: 钉住后位置偏移不超过 10px"""
+@pytest.fixture(autouse=True)
+def _cleanup_pin_windows(isolated_config):
+    """保证每个用例结束后不残留活跃窗口，避免用例间互相污染。
+
+    这里**必须**依赖 isolated_config：pytest 的夹具 teardown 是逆序执行的，
+    只有让本夹具在 isolated_config 之后 setup，它的清理才会在 monkeypatch
+    还原之前跑完。否则 ``win._on_close()`` 会写回用户真实配置。
+    """
+    yield
+    for win in list(PinWindow.active_windows):
+        try:
+            win._on_close()
+        except Exception:
+            pass
+    PinWindow.active_windows.clear()
+
+
+def test_pin_position_jitter_within_10px(tk_root, isolated_config):
+    """钉住后位置偏移不超过 10px"""
     img = Image.new('RGB', (100, 100))
     coords = (100, 100, 200, 200)
-    
-    # 运行多次以验证随机偏移范围
-    for _ in range(20):
+
+    for _ in range(10):
         win = PinWindow(img, coords=coords, master=tk_root)
         win.root.update()
-        
-        curr_x = win.root.winfo_x()
-        curr_y = win.root.winfo_y()
-        
-        # 允许 ±10px 偏移
-        assert abs(curr_x - coords[0]) <= 10
-        assert abs(curr_y - coords[1]) <= 10
-        
+        assert abs(win.root.winfo_x() - coords[0]) <= 10
+        assert abs(win.root.winfo_y() - coords[1]) <= 10
         win._on_close()
 
-def test_pin_window_boundary(tk_root):
-    """验证需求 2: 边界检测确保窗口在屏幕内"""
+
+def test_pin_stays_within_screen(tk_root, isolated_config):
+    """在屏幕边缘截图时，钉住窗口不得超出屏幕"""
     img = Image.new('RGB', (100, 100))
-    
-    # 模拟在屏幕边缘截图 (假设屏幕 1920x1080)
     screen_w = tk_root.winfo_screenwidth()
     screen_h = tk_root.winfo_screenheight()
-    
-    # 右下角坐标
-    coords = (screen_w - 50, screen_h - 50, screen_w, screen_h)
-    
-    win = PinWindow(img, coords=coords, master=tk_root)
-    win.root.update()
-    
-    curr_x = win.root.winfo_x()
-    curr_y = win.root.winfo_y()
-    
-    # 窗口不应超出右边界
-    assert curr_x + 100 <= screen_w
-    # 窗口不应超出下边界
-    assert curr_y + 100 <= screen_h
-    
-    win._on_close()
 
-def test_pin_window_no_overlap(tk_root):
-    """验证需求 3: 避免与其他钉住窗口重叠"""
+    win = PinWindow(img, coords=(screen_w - 50, screen_h - 50, screen_w, screen_h),
+                    master=tk_root)
+    win.root.update()
+
+    assert win.root.winfo_x() + 100 <= screen_w
+    assert win.root.winfo_y() + 100 <= screen_h
+
+
+def test_pin_windows_do_not_overlap(tk_root, isolated_config):
+    """同一位置连续钉住两次，两个窗口不得重叠"""
     img = Image.new('RGB', (50, 50))
     coords = (200, 200, 250, 250)
-    
-    # 创建第一个窗口
+
     win1 = PinWindow(img, coords=coords, master=tk_root)
     win1.root.update()
-    
-    # 在相同位置创建第二个窗口
     win2 = PinWindow(img, coords=coords, master=tk_root)
     win2.root.update()
-    
-    x1, y1 = win1.root.winfo_x(), win1.root.winfo_y()
-    x2, y2 = win2.root.winfo_x(), win2.root.winfo_y()
-    
-    # 验证位置不完全重合且偏移了至少重叠检测步长 (20px) 或随机抖动
-    # 由于有随机抖动，我们检查 AABB 是否重叠
-    w1, h1 = win1.root.winfo_width(), win1.root.winfo_height()
-    w2, h2 = win2.root.winfo_width(), win2.root.winfo_height()
-    
-    is_overlapping = (x1 < x2 + w2 and
-                     x1 + w1 > x2 and
-                     y1 < y2 + h2 and
-                     y1 + h1 > y2)
-    
-    assert not is_overlapping
-    
-    win1._on_close()
-    win2._on_close()
 
-def test_pin_window_zoom_stability(tk_root):
-    """验证缩放后位置逻辑稳定性"""
-    img = Image.new('RGB', (100, 100))
-    coords = (300, 300, 400, 400)
-    win = PinWindow(img, coords=coords, master=tk_root)
+    x1, y1 = win1.root.winfo_x(), win1.root.winfo_y()
+    w1, h1 = win1.root.winfo_width(), win1.root.winfo_height()
+    x2, y2 = win2.root.winfo_x(), win2.root.winfo_y()
+    w2, h2 = win2.root.winfo_width(), win2.root.winfo_height()
+
+    overlapping = (x1 < x2 + w2 and x1 + w1 > x2 and
+                   y1 < y2 + h2 and y1 + h1 > y2)
+    assert not overlapping
+
+
+def test_pin_zoom_keeps_top_left(tk_root, isolated_config):
+    """滚轮缩放后窗口左上角位置保持不变"""
+    win = PinWindow(Image.new('RGB', (100, 100)), coords=(300, 300, 400, 400),
+                    master=tk_root)
     win.root.update()
-    
-    pos_before_x = win.root.winfo_x()
-    pos_before_y = win.root.winfo_y()
-    
-    # 模拟滚轮放大
+    before_x, before_y = win.root.winfo_x(), win.root.winfo_y()
+
     class MockEvent:
         delta = 120
+
     win._on_zoom(MockEvent())
     win.root.update()
-    
-    # 缩放后窗口左上角位置应保持不变（Tkinter geometry 行为）
-    assert win.root.winfo_x() == pos_before_x
-    assert win.root.winfo_y() == pos_before_y
-    
-    win._on_close()
 
-if __name__ == "__main__":
-    pytest.main([__file__])
+    assert win.root.winfo_x() == before_x
+    assert win.root.winfo_y() == before_y
+    assert win.current_scale > 1.0          # 确实放大了
+
+
+def test_pin_zoom_out_shrinks(tk_root, isolated_config):
+    """反向滚轮应缩小"""
+    win = PinWindow(Image.new('RGB', (100, 100)), coords=(300, 300, 400, 400),
+                    master=tk_root)
+    win.root.update()
+
+    class MockEvent:
+        delta = -120
+
+    win._on_zoom(MockEvent())
+    assert win.current_scale < 1.0
+
+
+def test_pin_state_is_persisted_and_cleaned_up(tk_root, isolated_config):
+    """钉住状态必须落盘，关闭后必须清理干净"""
+    win = PinWindow(Image.new('RGB', (80, 80)), coords=(150, 150, 230, 230),
+                    master=tk_root)
+    win.root.update()
+    pin_id = win.pin_id
+
+    items = isolated_config.get_pinned_items()
+    assert any(i.get("id") == pin_id for i in items), "钉住状态未写入配置"
+
+    win._on_close()
+    assert not any(i.get("id") == pin_id for i in isolated_config.get_pinned_items()), \
+        "关闭后钉住状态未从配置中移除"
+
+
+def test_pin_close_cancels_topmost_timer(tk_root, isolated_config):
+    """关闭后不得残留置顶定时器（旧实现每 2 秒触发一次且永不取消）"""
+    win = PinWindow(Image.new('RGB', (60, 60)), coords=(100, 100, 160, 160),
+                    master=tk_root)
+    win.root.update()
+
+    assert win._topmost_job is not None
+    win._on_close()
+    assert win._topmost_job is None

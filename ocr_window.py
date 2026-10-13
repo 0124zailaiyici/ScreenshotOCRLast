@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import scrolledtext, messagebox, filedialog
 import threading
-from ocr_engine import create_ocr_engine
+from ocr_engine import create_ocr_engine, OcrError
 from translator import translator
 from config import config_manager
 from clipboard_manager import clipboard_manager
@@ -38,7 +38,7 @@ class OcrWindow:
         self.root.attributes("-topmost", True)
         self.root.config(bg=theme_manager.theme.bg_primary)
 
-        self.result = {"done": False, "text": "", "error": None}
+        self.result = {"done": False, "text": "", "error": None, "error_kind": None}
         self.translations = {}
         self.current_lang = "raw"
 
@@ -79,7 +79,7 @@ class OcrWindow:
         toolbar.pack(side="top", fill="x")
 
         # 复制按钮（图标+文字，图标用白色以匹配有色背景）
-        clip_icon = icons.get_clipboard("white")
+        clip_icon = icons.get_clipboard("#FFFFFF", master=toolbar)
         self.btn_copy = tk.Button(
             toolbar, image=clip_icon, text=" 复制",
             compound="left",
@@ -133,14 +133,20 @@ class OcrWindow:
             engine = create_ocr_engine(config_manager.get("ocr_backend"))
             if not engine.is_available():
                 self.result["error"] = "Tesseract 未安装或不在环境变量中"
+                self.result["error_kind"] = "not_found"
                 self.result["done"] = True
                 return
 
             text = engine.recognize(self.image)
             self.result["text"] = text
             self.result["done"] = True
+        except OcrError as e:
+            self.result["error"] = str(e)
+            self.result["error_kind"] = e.kind
+            self.result["done"] = True
         except Exception as e:
             self.result["error"] = str(e)
+            self.result["error_kind"] = "other"
             self.result["done"] = True
 
     def _poll_result(self):
@@ -150,16 +156,30 @@ class OcrWindow:
             if self.result["error"]:
                 self.text_area.delete("1.0", tk.END)
                 error_msg = self.result["error"]
-                self.text_area.insert(
-                    tk.END,
-                    f"识别失败: {error_msg}\n\n"
-                    f"原因：系统未找到 Tesseract 引擎。\n"
-                    f"解决办法：\n"
-                    f"1. 前往 https://github.com/UB-Mannheim/tesseract/wiki 下载并安装。\n"
-                    f"2. 若已安装，请在下方对话框中手动指定 tesseract.exe 路径。"
-                )
+                kind = self.result.get("error_kind") or "other"
 
-                if "Tesseract" in self.result["error"]:
+                if kind == "not_found":
+                    hint = (
+                        "原因：系统未找到 Tesseract 引擎。\n"
+                        "解决办法：\n"
+                        "1. 前往 https://github.com/UB-Mannheim/tesseract/wiki 下载并安装。\n"
+                        "2. 若已安装，请在下方对话框中手动指定 tesseract.exe 路径。"
+                    )
+                elif kind == "lang_pack":
+                    hint = (
+                        "原因：缺少识别语言包。\n"
+                        "解决办法：\n"
+                        "1. 重新运行 Tesseract 安装程序，勾选所需语言数据（中文需勾选 Chinese）。\n"
+                        "2. 或把对应的 .traineddata 文件放入 tessdata 目录。"
+                    )
+                else:
+                    hint = "请检查 Tesseract 安装与配置后重试。"
+
+                self.text_area.insert(tk.END, f"识别失败: {error_msg}\n\n{hint}")
+
+                # 只有确实找不到引擎时才引导用户重新指定路径，
+                # 否则（例如缺语言包）弹路径选择框会误导用户。
+                if kind == "not_found":
                     if messagebox.askyesno(
                         "Tesseract 路径错误",
                         f"{self.result['error']}\n是否现在手动指定 tesseract.exe 路径？"
@@ -172,6 +192,7 @@ class OcrWindow:
                             config_manager.set("tesseract_path", path)
                             self.result["done"] = False
                             self.result["error"] = None
+                            self.result["error_kind"] = None
                             self.text_area.delete("1.0", tk.END)
                             self.text_area.insert(tk.END, "重新识别中...")
                             threading.Thread(target=self._do_ocr, daemon=True).start()
@@ -190,13 +211,13 @@ class OcrWindow:
             return
 
         if clipboard_manager.copy_text(text):
-            ck_icon = icons.get_checkmark("#FFFFFF")
+            ck_icon = icons.get_checkmark("#FFFFFF", master=self.btn_copy)
             self.btn_copy.config(image=ck_icon, text=" 已复制", bg=COLOR_SUCCESS)
             self.btn_copy._icon_ref = ck_icon
             self.root.after(1500, self._restore_copy_button)
 
     def _restore_copy_button(self):
-        clip_icon = icons.get_clipboard("#FFFFFF")
+        clip_icon = icons.get_clipboard("#FFFFFF", master=self.btn_copy)
         self.btn_copy.config(image=clip_icon, text=" 复制", bg=theme_manager.accent_color)
         self.btn_copy._icon_ref = clip_icon
 

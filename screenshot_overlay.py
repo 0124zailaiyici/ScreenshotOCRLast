@@ -138,7 +138,7 @@ class ScreenshotOverlay:
         green = "#107C10"
 
         # 图钉按钮
-        pin_icon = icons.get_pin(accent)
+        pin_icon = icons.get_pin(accent, master=inner)
         btn_pin = tk.Button(
             inner, image=pin_icon, text=" 钉住",
             compound="left", fg=text_color,
@@ -148,7 +148,7 @@ class ScreenshotOverlay:
         btn_pin.pack(side="left")
 
         # 识字按钮
-        search_icon = icons.get_search(green)
+        search_icon = icons.get_search(green, master=inner)
         btn_ocr = tk.Button(
             inner, image=search_icon, text=" 识字",
             compound="left", fg=text_color,
@@ -158,7 +158,7 @@ class ScreenshotOverlay:
         btn_ocr.pack(side="left")
 
         # 复制按钮
-        clip_icon = icons.get_clipboard(accent)
+        clip_icon = icons.get_clipboard(accent, master=inner)
         btn_copy = tk.Button(
             inner, image=clip_icon, text=" 复制",
             compound="left", fg=text_color,

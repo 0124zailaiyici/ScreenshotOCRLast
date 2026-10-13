@@ -12,6 +12,7 @@ from screenshot_overlay import select_region
 from ocr_window import show_ocr_window
 from pin_window import show_pin_window
 from config import config_manager
+from translator import translator
 from ui_theme import theme_manager
 from ui_icons import icons
 
@@ -47,7 +48,8 @@ class ScreenshotOCRApp:
         self._pin_root = None
         self._pin_queue = queue.Queue()
         self._pin_ready = threading.Event()
-        threading.Thread(target=self._pin_loop, daemon=True).start()
+        self._pin_thread = threading.Thread(target=self._pin_loop, daemon=True)
+        self._pin_thread.start()
         self._pin_ready.wait()
 
     # ---- 单实例检测 ----
@@ -109,8 +111,34 @@ class ScreenshotOCRApp:
 
     def _on_screenshot_trigger(self):
         if not self._screenshot_lock.acquire(blocking=False):
-            return
-        self._pin_queue.put(self._do_screenshot)
+            # 锁仍被持有。绝大多数情况下这是**正常**的：截图选区与 OCR 窗口
+            # 会一直持有锁到会话结束（用户可能开着 OCR 窗口读文字、等翻译），
+            # 此时必须静默忽略，与旧行为保持一致。
+            #
+            # 唯一可以安全回收的情形是消费队列的 Tk 线程已经死亡 —— 那时队列
+            # 不会再被处理，锁确实永久泄漏。
+            #
+            # 绝不能按时间阈值回收：threading.Lock 没有属主概念，释放一个
+            # 仍被合法持有的锁会让两个截图会话并发执行，并使后续的 release
+            # 抛 "release unlocked lock"，互斥彻底失效。
+            if self._pin_thread is not None and self._pin_thread.is_alive():
+                return
+            print("Tk 线程已退出，回收遗留的截图会话锁")
+            try:
+                self._screenshot_lock.release()
+            except RuntimeError:
+                pass
+            if not self._screenshot_lock.acquire(blocking=False):
+                return
+
+        try:
+            self._pin_queue.put(self._do_screenshot)
+        except Exception as e:
+            print(f"截图任务入队失败: {e}")
+            try:
+                self._screenshot_lock.release()
+            except RuntimeError:
+                pass
 
     def _do_screenshot(self):
         """在 Tk 线程中执行截图"""
@@ -197,6 +225,8 @@ class ScreenshotOCRApp:
         sys.exit(0)
 
     def run(self):
+        # 显式迁移旧版写在 CWD 的翻译历史（不在模块导入期做，避免副作用）
+        translator.migrate_legacy_history()
         self._restore_pinned_windows()
         self.hotkey.start(config_manager.get("hotkey"))
         print("ScreenshotOCR 已常驻系统托盘 (Alt+X 触发)")
