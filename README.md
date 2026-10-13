@@ -14,6 +14,20 @@ Windows 截图工具，支持截图后三选一操作：钉住到屏幕、OCR �
 - **用户主控复制**：废弃自动复制。
 - **系统集成**：常驻系统托盘，支持配置持久化。
 
+### 资源占用（实测）
+
+打包后的 EXE 空转（未使用翻译）时：
+
+| 指标 | 数值 |
+|------|------|
+| 工作集 | 约 50 ~ 60 MB |
+| 私有内存 | 约 50 MB |
+| 线程数 | 10 |
+| **空闲 CPU** | **0.000%** |
+
+OCR 引擎 `tesseract.exe` 是每次识别时 spawn 的子进程、用完即退，其内存不计入本进程。
+翻译所用的 `translators` 库重达 48MB，已改为**首次点击翻译时**才加载，因此常驻期间不占用。
+
 ## 2. 功能详细说明
 
 ### 2.1 OCR 识别与翻译
@@ -89,6 +103,14 @@ python build_exe.py
 本项目采用 [MIT License](LICENSE) 开源许可证。
 
 ## 7. 更新日志 (Changelog)
+
+### [v1.2.3] - 2026-10-13
+
+- **\[Fix]** 消除 OCR 时一闪而过的控制台窗口：pytesseract 的 `get_tesseract_version()` / `get_languages()` 用的是裸 `subprocess` 调用，而本程序是无控制台的 GUI 进程，Windows 会为子进程新建一个**可见**的控制台窗口。`ocr_engine` 现在把 `pytesseract.pytesseract.subprocess` 整体替换为注入 `CREATE_NO_WINDOW` 的版本（实测只有 `CREATE_NO_WINDOW` 可靠，`SW_HIDE` 不足）
+- **\[Perf]** `is_available()` 按 tesseract 可执行文件路径缓存，不再每次识别都多 spawn 一次 tesseract 去查版本号（每次约省 500ms）
+- **\[Perf]** `translators` 改为首次真正翻译时才导入：它一个包占 **48MB**（全程序内存的 80%）并拖慢启动 **2.4 秒**。打包后常驻内存 **119.8MB → 59.6MB**，启动快 2.4 秒
+- **\[Fix]** 截图会话锁的遗留回收改为判断消费队列的 Tk 线程是否存活（v1.2.2 引入的 30s 超时会在锁仍被合法持有时强行释放，导致两个截图会话并发执行、后续 `release` 抛 `release unlocked lock`）
+- **\[Test]** 测试增至 **31 个**，并新增两条回归防护（子进程必须无控制台窗口、translator 不得在导入期加载 translators）；测试套件由 3.26s 降至 1.20s
 
 ### [v1.2.2] - 2026-10-13
 
