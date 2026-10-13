@@ -1,8 +1,15 @@
 import tkinter as tk
 from PIL import Image, ImageTk, ImageGrab
 from config import config_manager
-from ui_theme import theme_manager, FONT_BUTTON
+from ui_theme import (
+    FONT_BUTTON,
+    RADIUS_M,
+    SPACE_SM,
+    px,
+    theme_manager,
+)
 from ui_icons import icons
+from ui_widgets import RoundedCard, flat_button, vdivider
 
 
 class ScreenshotOverlay:
@@ -101,71 +108,82 @@ class ScreenshotOverlay:
         self.selection_img = ImageGrab.grab(bbox=(x1, y1, x2, y2), all_screens=True)
         self._show_toolbar(x2, y2)
 
+    # 抠圆角用的透明色键。必须是界面上绝不会出现的颜色。
+    _TRANSPARENT_KEY = "#FF00FE"
+
     def _show_toolbar(self, x, y):
-        """在选区右下角显示图标+文字的浮动工具栏"""
+        """在选区右下角显示图标+文字的浮动工具栏。
+
+        圆角靠 ``-transparentcolor`` 抠：把一个绝不使用的颜色声明为透明色，在 Canvas 上
+        画圆角矩形，四个角露出的就是透明色，窗口看起来就是圆角的。
+        """
         theme = theme_manager.theme
+        accent = theme_manager.accent_color
+
         self.toolbar = tk.Toplevel(self.root)
         self.toolbar.overrideredirect(True)
         self.toolbar.attributes("-topmost", True)
 
-        # 外框（border_default 色模拟 1px 边框）
-        self.toolbar.config(bg=theme.border_default)
+        transparent = True
+        try:
+            self.toolbar.config(bg=self._TRANSPARENT_KEY)
+            self.toolbar.attributes("-transparentcolor", self._TRANSPARENT_KEY)
+        except tk.TclError:
+            # 老系统不支持透明色时退回直角外观，功能不受影响
+            transparent = False
+            self.toolbar.config(bg=theme.border_default)
+        outer_bg = self._TRANSPARENT_KEY if transparent else theme.bg_toolbar
 
-        # 内框（工具栏表面）
-        inner = tk.Frame(self.toolbar, bg=theme.bg_toolbar)
-        inner.pack(padx=1, pady=1)
-
-        # 避让屏幕边缘（按钮宽度约 220px）
-        toolbar_w = 220
-        if x + toolbar_w > self.screen_width:
-            x = self.screen_width - toolbar_w - 10
-        if y + 50 > self.screen_height:
-            y = y - 60
-        self.toolbar.geometry(f"+{x-180}+{y+5}")
-
-        btn_kw = {
-            "bg": theme.bg_toolbar,
-            "activebackground": theme.bg_hover,
-            "font": FONT_BUTTON,
-            "relief": "flat",
-            "padx": 8,
-            "cursor": "hand2",
-        }
-
-        # 鲜艳图标 + 自适应文字颜色
-        text_color = theme.text_primary
-        accent = theme_manager.accent_color
-        green = "#107C10"
-
-        # 图钉按钮
-        pin_icon = icons.get_pin(accent, master=inner)
-        btn_pin = tk.Button(
-            inner, image=pin_icon, text=" 钉住",
-            compound="left", fg=text_color,
-            command=lambda: self._trigger("pin"), **btn_kw
+        self._toolbar_card = RoundedCard(
+            self.toolbar, radius=RADIUS_M, padding=SPACE_SM,
+            card_bg=theme.bg_toolbar, outer_bg=outer_bg,
+            border=theme.border_default,
         )
-        btn_pin._icon_ref = pin_icon
-        btn_pin.pack(side="left")
+        self._toolbar_card.pack()
+        row = self._toolbar_card.body
 
-        # 识字按钮
-        search_icon = icons.get_search(green, master=inner)
-        btn_ocr = tk.Button(
-            inner, image=search_icon, text=" 识字",
-            compound="left", fg=text_color,
-            command=lambda: self._trigger("ocr"), **btn_kw
-        )
-        btn_ocr._icon_ref = search_icon
-        btn_ocr.pack(side="left")
+        # (动作, 文案, 图标方法名, 图标颜色)
+        specs = [
+            ("pin", "钉住", "get_pin", accent),
+            ("ocr", "识字", "get_search", theme.success),
+            ("copy", "复制", "get_clipboard", accent),
+        ]
+        for index, (action, label, icon_method, color) in enumerate(specs):
+            if index:
+                vdivider(row, height=16).pack(side="left", padx=px(row, 2))
+            icon = getattr(icons, icon_method)(color, master=row)
+            btn = flat_button(
+                row, text=f" {label}", image=icon, compound="left",
+                command=lambda a=action: self._trigger(a),
+                bg=theme.bg_toolbar, fg=theme.text_primary,
+                hover_bg=theme.bg_hover, padx=12, pady=3,
+            )
+            btn._icon_ref = icon
+            btn.pack(side="left")
 
-        # 复制按钮
-        clip_icon = icons.get_clipboard(accent, master=inner)
-        btn_copy = tk.Button(
-            inner, image=clip_icon, text=" 复制",
-            compound="left", fg=text_color,
-            command=lambda: self._trigger("copy"), **btn_kw
-        )
-        btn_copy._icon_ref = clip_icon
-        btn_copy.pack(side="left")
+        self._place_toolbar(x, y)
+
+    def _place_toolbar(self, x, y):
+        """把工具栏摆到选区右下角，并避让屏幕边缘。
+
+        尺寸必须实测（``fit_to_content``）—— 旧实现里写死了 ``toolbar_w = 220``，
+        而实际宽度是 299，导致贴到屏幕右边时工具栏会有一部分跑到屏幕外。
+        """
+        self.toolbar.update_idletasks()
+        w, h = self._toolbar_card.fit_to_content()
+        gap = px(self.toolbar, 8)
+
+        tx = x - w            # 右边缘与选区右边缘对齐
+        ty = y + gap          # 默认落在选区下方
+        if tx < 0:
+            tx = 0
+        if tx + w > self.screen_width:
+            tx = max(0, self.screen_width - w - gap)
+        if ty + h > self.screen_height:
+            ty = y - h - gap  # 下方放不下就翻到选区上方
+        if ty < 0:
+            ty = 0
+        self.toolbar.geometry(f"+{int(tx)}+{int(ty)}")
 
     def _on_cancel(self):
         """用户取消截图（按 Esc），通知主循环销毁 root 以释放锁"""

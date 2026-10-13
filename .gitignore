@@ -37,3 +37,6 @@ tesseract_path.txt
 .claude/
 .agents/
 skills-lock.json
+
+# 临时诊断探针 / 预览图（约定：文件名以 _ 开头，用完即删）
+_*

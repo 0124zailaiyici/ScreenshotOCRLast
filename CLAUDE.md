@@ -50,11 +50,12 @@ Windows 截图工具，支持截图后三选一操作：钉住到屏幕、OCR �
 ├── clipboard_manager.py      # 剪贴板 (pywin32 CF_DIB/CF_UNICODETEXT)
 ├── hotkey_listener.py        # 全局热键 (pynput)
 ├── tray_app.py               # 系统托盘 (pystray)
-├── ui_theme.py               # 主题系统（深色/浅色 + AccentColor）
+├── ui_theme.py               # 主题令牌：颜色 / 字体 / 间距 / DPI 换算 / 强调色派生
+├── ui_widgets.py             # 自绘控件：圆角卡片 / 细滚动条 / 扁平按钮 / 分段选择器
 ├── ui_icons.py               # 图标缓存管理器 (PIL 程序化生成，随 Tk root 失效)
 ├── conftest.py               # pytest 共享夹具（会话级 Tk root、配置隔离）
-├── test_app.py               # 单元测试：配置 / 剪贴板 / OCR 契约
-├── test_integration.py       # 集成测试：OCR 窗口几何与异步翻译
+├── test_app.py               # 单元测试：配置 / 剪贴板 / OCR 契约 / 主题与自绘控件
+├── test_integration.py       # 集成测试：OCR 窗口几何、布局与异步翻译
 ├── test_pin_logic.py         # 集成测试：钉住窗口位置 / 边界 / 持久化
 ├── verify_app.py             # 真实自检脚本（会失败、非零退出码）
 ├── build_exe.py              # PyInstaller 打包脚本
@@ -143,7 +144,7 @@ pytest>=7.0.0        # 单元测试框架
 ## 测试与验证
 
 ```bash
-pytest test_app.py test_integration.py test_pin_logic.py   # 31 个用例
+pytest test_app.py test_integration.py test_pin_logic.py   # 46 个用例
 python verify_app.py                                       # 环境自检，失败返回非零退出码
 ```
 
@@ -166,4 +167,13 @@ python verify_app.py                                       # 环境自检，失�
 - **`translators` 必须延迟导入**：它的依赖树极重 —— 实测 `import translators` 耗时 **约 2.4 秒**、工作集 **+48MB**，占整个程序内存的 **80%**。它一次拖进 aiohttp / httpx / niquests / requests **四套 HTTP 客户端**，外加 `cryptography`、`lxml`、`multiprocess`、`pathos`、`psutil`、`tqdm` 等 40 多个包。而翻译只是 OCR 之后的次要功能，多数会话根本用不到。因此 `translator.py` 用 `_translators()` 在**首次真正翻译时**才导入，**绝不允许**在模块顶层写 `import translators`。实测收益：源码启动工作集 74.7M → 26.9M，打包后 EXE 119.8M → 59.6M，启动也快了 2.4 秒。`test_app.py::test_translator_does_not_import_the_heavy_engine_at_module_level` 是这条的回归防护。
 - **延迟导入的内存收益有前提：本次运行没点过翻译**。Python 无法可靠卸载已导入的模块 —— 用户第一次点「中文/英文」后，那 48MB 会一直留到程序重启（实测 50MB → 100MB）。**不要试图用 `del sys.modules["translators"]` 去"回收"**：它不会把内存还给操作系统，强行重新导入还有崩溃风险。真要"用完就降回来"，只能把翻译做成用完即退的独立子进程，复杂度明显上升，目前不做。
 - **内存基线**（空转、无翻译，用于回归对比）：打包后 EXE **约 50~60MB 工作集 / 约 50MB 私有 / 10 个线程 / 空闲 CPU 0.000%**。逐阶段构成：空解释器 14.5M、tkinter +3.6M、Pillow +4.4M、pystray +1.7M、pynput +0.4M、pywin32 +1.4M、pytesseract +0.2M、**本项目全部模块 +0.3M**。也就是说内存几乎全由第三方库决定，**优化要往"少加载/晚加载第三方包"方向做，改自己的代码没有意义**。注意 `tesseract.exe` 是每次识别 spawn 的子进程、用完即退，它的内存从不计入本进程。
+- **UI 主题与自绘控件**：`ui_theme.py` 是唯一的颜色/字体/间距来源，`ui_widgets.py` 放 Tk 原生做不到的件（圆角卡片、细滚动条、扁平按钮、分段选择器）。改界面前先读这两个文件的模块注释。
+- **字体必须含中日韩字形**：`FONT_FAMILY` 是 `Microsoft YaHei UI`（同时含拉丁与中日韩字形）。**不要改回 `Segoe UI`** —— 它没有中文字形，Tk 只能逐字回退，中英文混排时字重/字距/基线全都不一致（实测症状：中文明显比英文粗）。注意 `Microsoft YaHei`（不带 ` UI`）这个名字在系统里**并不存在**，Tk 对不存在的字体名不报错、只静默回退，所以 `test_app.py::test_ui_font_family_is_actually_installed` 会拦住它。
+- **字号用「点」（正数），间距用 `px()`（逻辑像素）**：本程序是 DPI 感知的，Tk 会把点按 `tk scaling` 换算成物理像素（实测本机 150% 缩放，`tk scaling = 2.0`）。而 `padx`/`pady`/`width`/`height` 的单位是**物理像素**，直接写 12 在 150% 屏上只有 8 个逻辑像素、观感偏挤 —— 所以间距一律过 `ui_theme.px()`。窗口尺寸同理按 DPI 缩放（见 `ocr_window._compute_window_size`）。
+- **`RoundedCard` 的 Canvas 必须显式设 `width=1, height=1`**：Tk 的 Canvas **默认请求尺寸很大**（实测约 570x400），而 Canvas 的请求尺寸会一路传播到外层 Frame。不压掉的话，包着卡片的容器会虚报几百像素高，在窗口不够高时把空间吃光，排在它后面打包的兄弟控件被压成 0 高度、`winfo_ismapped()` 变 0 —— 实测踩过一次，整条状态栏消失。这条有两个回归防护：`test_app.py::test_rounded_card_does_not_inflate_its_parent_request`（根因层）与 `test_integration.py::test_ocr_window_layout_is_not_over_subscribed`（现象层）。
+- **Tk 的 packer 在空间不够时按调用顺序分配**：固定尺寸的"外框"（操作栏、状态栏）要先打包，`expand=True` 的内容区放最后。这是惯用法，但**它本身不是上面那条 bug 的根因** —— 真正的根因是请求尺寸被虚报。两者都要做。
+- **Tk 的 Text 没有 line-height**：行距只能靠 `spacing1/2/3` 模拟，而三者语义不同 —— `spacing1/3` 只作用于**逻辑行**的上下，`spacing2` 才作用于同一逻辑行的**折行之间**。只设 `spacing1/3` 的话，长行折行处会紧贴上一行、硬换行处却很松，同一段文字里出现两种行距。正确组合是 `spacing1=0, spacing2=spacing3=extra`（见 `ocr_window._line_spacing`）。
+- **圆角只能自绘**：Tk 没有 `border-radius`。`RoundedCard` 用 `create_polygon(smooth=True)` 画圆角矩形，内容控件叠在上面 —— 因此**内容的内缩量必须 >= 圆角半径**，否则直角的控件会盖住圆角（`RoundedCard` 内部已强制 `max(padding, radius)`）。浮动工具栏的窗口圆角靠 `-transparentcolor` 抠出来（见 `screenshot_overlay._show_toolbar`）。
+- **`tk.Scrollbar` 一定带上下箭头**，`ttk.Scrollbar` 在 Windows 上受原生主题限制、做不出细圆角滑块 —— 所以滚动条用 `ui_widgets.ThinScrollbar` 自绘。`tk.Button` 即使 `relief="flat"` 在 Windows 上**仍会画立体边框**，必须同时 `bd=0` + `highlightthickness=0`（见 `ui_widgets.flat_button`）。
+- **UI 改动必须两种主题都验证**：`%APPDATA%` 里的配置决定明暗，只测一种会漏掉写死的色值。`_ui_shot.py` 这类临时探针的写法：`config_manager.is_dark_mode = lambda: False` 强制浅色，再用 `ImageGrab` 抓窗口（**探针自己也要先 `SetProcessDPIAware()`，否则 Tk 的逻辑坐标与 ImageGrab 的物理像素对不上，会抓到别的窗口**；无边框浮窗还要 `-topmost`，否则会被别的窗口盖住）。
 - **pandas 体积陷阱**：`pytesseract` 会 `try: import pandas`（仅服务于 `Output.DATAFRAME`，本项目用不到）。一旦运行环境装了 pandas，就会连带载入 numpy + OpenBLAS，实测多占 **约 63MB 工作集 / 528MB 私有内存 / 23 个线程**。`build_exe.py` 里的 `--exclude-module=pandas` 是安全的（pytesseract 的导入有 try/except 保护），不要移除；开发环境同样建议使用不含 pandas 的 venv。

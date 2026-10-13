@@ -24,6 +24,7 @@ def build():
         '--hidden-import=translators',
         '--hidden-import=PIL.ImageTk',
         '--hidden-import=ui_theme',
+        '--hidden-import=ui_widgets',
         '--hidden-import=ui_icons',
 
         # 排除不必要的超大库以减小体积

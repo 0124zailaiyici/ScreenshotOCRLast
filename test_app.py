@@ -327,3 +327,195 @@ def test_translator_does_not_import_the_heavy_engine_at_module_level(tmp_path):
     )
     assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
     assert "OK" in result.stdout
+
+
+# ---------- 主题与自绘控件 ----------
+
+def test_px_converts_logical_pixels_by_dpi():
+    """``px()`` 必须按 DPI 换算。
+
+    回归防护：Tk 的 ``padx``/``pady``/``width`` 单位是**物理像素**，而设计稿上的间距
+    是逻辑像素。不换算的话，在 150% 缩放的屏幕上间距会缩水三分之一，界面显得挤。
+    """
+    from ui_theme import px
+
+    class FakeWidget:
+        def __init__(self, dpi):
+            self._dpi = dpi
+
+        def winfo_fpixels(self, _spec):
+            return self._dpi
+
+    assert px(FakeWidget(96), 12) == 12      # 100%
+    assert px(FakeWidget(144), 12) == 18     # 150%
+    assert px(FakeWidget(192), 12) == 24     # 200%
+    # 再小的值也不能算出 0，否则控件会被压没
+    assert px(FakeWidget(96), 0) == 1
+
+
+def test_px_falls_back_to_one_when_dpi_is_unavailable():
+    """取不到 DPI 时必须保守回退，不能抛异常把界面初始化打断"""
+    from ui_theme import dpi_scale, px
+
+    class BrokenWidget:
+        def winfo_fpixels(self, _spec):
+            raise RuntimeError("no display")
+
+    assert dpi_scale(BrokenWidget()) == 1.0
+    assert px(BrokenWidget(), 10) == 10
+
+
+def test_light_and_dark_themes_define_the_same_fields():
+    """回归防护：新增主题令牌时漏改其中一个是最容易犯的错。
+
+    ``Theme`` 是无默认值的 frozen dataclass，漏掉字段会在构造时就报错；
+    但"两边都定义了、只是某一边忘了调整取值"只能靠这条测试兜住 ——
+    这里至少保证字段集合完全一致。
+    """
+    from ui_theme import DARK, LIGHT
+
+    assert set(vars(LIGHT)) == set(vars(DARK))
+    # 每个字段都必须是非空的颜色/数值，不能留空字符串
+    for name, value in vars(LIGHT).items():
+        assert value != "", f"LIGHT.{name} 是空的"
+    for name, value in vars(DARK).items():
+        assert value != "", f"DARK.{name} 是空的"
+
+
+def test_readable_on_picks_a_contrasting_foreground():
+    """压在强调色上的文字颜色必须按亮度自动选，不能写死白色。
+
+    系统强调色是用户可改的（实测本机是紫色），浅色强调色上压白字会看不清。
+    """
+    from ui_theme import readable_on
+
+    assert readable_on("#000000") == "#FFFFFF"
+    assert readable_on("#FFFFFF") == "#1A1A1A"
+    assert readable_on("#FFD700") == "#1A1A1A"   # 亮黄必须配深色字
+
+
+def test_accent_variants_are_distinct_and_follow_the_system_color():
+    """强调色的派生值（悬停/按下/浅底/文字色）必须彼此不同，且跟随系统强调色变化"""
+    from ui_theme import ThemeManager
+
+    tm = ThemeManager()
+    tm.update(is_dark=True, accent_color="#0078D4")
+    blue = (tm.accent, tm.accent_hover, tm.accent_pressed, tm.accent_soft,
+            tm.accent_border, tm.accent_text)
+    assert len(set(blue)) == len(blue), "派生色之间不应重合，否则看不出悬停/选中状态"
+
+    tm.update(is_dark=True, accent_color="#C239B3")
+    magenta = (tm.accent, tm.accent_hover, tm.accent_pressed, tm.accent_soft,
+               tm.accent_border, tm.accent_text)
+    assert magenta != blue, "换了系统强调色，派生值必须跟着变"
+
+    # 明暗主题下同一个强调色要派生出不同的值（深色底上要提亮）
+    tm.update(is_dark=False, accent_color="#0078D4")
+    light_accent = tm.accent
+    tm.update(is_dark=True, accent_color="#0078D4")
+    assert tm.accent != light_accent
+
+
+def test_ui_font_family_is_actually_installed(tk_root):
+    """回归防护：``FONT_FAMILY`` 必须是系统里真实存在的字体。
+
+    Tk 对不存在的字体名**不会报错**，只会静默回退到默认字体 —— 而默认字体没有中文
+    字形，于是中英文混排时字重、字距、基线都不一致（这正是原来用 "Segoe UI" 时的
+    症状：截图里中文明显比英文粗）。实测本机只有 "Microsoft YaHei UI"，
+    "Microsoft YaHei" 这个名字并不存在，改错了会静默退化。
+    """
+    import tkinter.font as tkfont
+
+    from ui_theme import FONT_FAMILY
+
+    assert FONT_FAMILY in set(tkfont.families(tk_root)), (
+        f"{FONT_FAMILY!r} 不在系统字体列表里，Tk 会静默回退，中文字形会不一致"
+    )
+
+
+def test_rounded_card_padding_never_covers_the_corners(tk_root):
+    """回归防护：卡片内容的内缩量必须 >= 圆角半径。
+
+    Tk 没有 border-radius，圆角是画在 Canvas 上、内容控件叠在上面的。内容控件是直角的，
+    内缩量一旦小于半径，四个圆角就会被内容盖住，卡片看起来又变回方角。
+    """
+    from ui_theme import px
+    from ui_widgets import RoundedCard
+
+    card = RoundedCard(tk_root, radius=12, padding=2)   # 故意给一个过小的 padding
+    try:
+        assert card.padding >= px(card, 12)
+    finally:
+        card.destroy()
+
+
+def test_rounded_card_does_not_inflate_its_parent_request(tk_root):
+    """回归防护：``RoundedCard`` 不得虚报请求尺寸。
+
+    Tk 的 Canvas 默认请求尺寸是 **570x400**，而 Canvas 的请求尺寸会传播到外层 Frame。
+    于是"包着卡片的容器"会声称自己要 396px 高，在窗口不够高时把空间吃光，排在它之后
+    打包的兄弟控件（实测是状态栏）被压成 0 高度、``winfo_ismapped()`` 变 0。
+    这条测试直接盯住请求尺寸本身，比在窗口层面断言更贴近根因。
+    """
+    from ui_widgets import RoundedCard
+
+    card = RoundedCard(tk_root, radius=8, padding=12)
+    try:
+        card.update_idletasks()
+        assert card.winfo_reqheight() < 100, (
+            f"RoundedCard 请求了 {card.winfo_reqheight()}px 高度，"
+            "说明 Canvas 的默认请求尺寸没有被压掉"
+        )
+        assert card.winfo_reqwidth() < 100
+    finally:
+        card.destroy()
+
+
+def test_rounded_card_fit_to_content_shrinks_to_the_body(tk_root):
+    """工具栏依赖 ``fit_to_content`` 由内容决定窗口大小，它必须真的生效"""
+    import tkinter as tk
+
+    from ui_widgets import RoundedCard
+
+    card = RoundedCard(tk_root, radius=8, padding=8)
+    try:
+        tk.Label(card.body, text="钉住 识字 复制").pack()
+        w, h = card.fit_to_content()
+        assert w == card.body.winfo_reqwidth() + card.padding * 2
+        assert h == card.body.winfo_reqheight() + card.padding * 2
+        assert card.canvas.winfo_reqwidth() == w
+        assert card.canvas.winfo_reqheight() == h
+    finally:
+        card.destroy()
+
+
+def test_thin_scrollbar_hides_thumb_when_content_fits(tk_root):
+    """滚动条必须自绘、且内容不满一屏时不画滑块。
+
+    回归防护：``tk.Scrollbar`` 一定带上下箭头按钮，正是"原生 Python 模样"最刺眼的来源；
+    ``ttk.Scrollbar`` 在 Windows 上又受原生主题限制、做不出细圆角滑块。
+    """
+    import tkinter as tk
+
+    from ui_widgets import ThinScrollbar
+
+    host = tk.Toplevel(tk_root)
+    try:
+        sb = ThinScrollbar(host, thickness=6)
+        sb.pack(fill="both", expand=True)
+        host.geometry("120x200")
+        host.update()
+
+        sb.set(0.0, 1.0)                      # 内容没超出一屏
+        assert sb._thumb_geom == (0, 0), "内容没超出一屏时不该画滑块"
+
+        sb.set(0.0, 0.25)                     # 超出 -> 必须画出滑块
+        assert sb._thumb_geom[1] > 0, "内容超出时滑块必须可见"
+        assert sb._thumb_geom[1] < 200, "滑块高度应正比于可见比例"
+
+        # 滑块位置必须随 first 变化（否则拖不动）
+        top_before = sb._thumb_geom[0]
+        sb.set(0.5, 0.75)
+        assert sb._thumb_geom[0] > top_before
+    finally:
+        host.destroy()

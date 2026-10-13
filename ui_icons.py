@@ -61,11 +61,30 @@ class IconProvider:
             self._cache[key] = self._draw_checkmark(color, root)
         return self._cache[key]
 
+    def get_refresh(self, color, master=None):
+        root = self._sync(master)
+        key = self._make_key("refresh", color)
+        if key not in self._cache:
+            self._cache[key] = self._draw_refresh(color, root)
+        return self._cache[key]
+
     def clear_cache(self):
         self._cache.clear()
         self._cache_root = None
 
     # ---- 内部绘制方法（48x48 双倍尺寸 -> 缩放到 _size） ----
+
+    @staticmethod
+    def _line_round(dc, p1, p2, color, width):
+        """带圆头的线段。
+
+        PIL 的 ``line`` 是平头（butt cap），端点显得生硬；在两个端点各补一个圆
+        就得到圆头效果，和现代图标集的观感一致。
+        """
+        dc.line([p1, p2], fill=color, width=width)
+        r = width / 2.0
+        for (x, y) in (p1, p2):
+            dc.ellipse([x - r, y - r, x + r, y + r], fill=color)
 
     def _render(self, draw_func, master):
         """在 2x 画布上绘制，缩放到目标尺寸，并绑定到指定的 Tk root"""
@@ -79,22 +98,30 @@ class IconProvider:
 
     def _draw_pin(self, color, master):
         def draw(dc, s):
-            # 图钉头部（圆）
-            dc.ellipse([s * 0.3, s * 0.08, s * 0.7, s * 0.48], fill=color)
+            # 钉帽（圆）
+            dc.ellipse([s * 0.30, s * 0.10, s * 0.70, s * 0.50], fill=color)
             # 高光反光
-            dc.ellipse([s * 0.35, s * 0.14, s * 0.48, s * 0.28], fill="white")
-            # 针身
-            dc.line([(s * 0.5, s * 0.44), (s * 0.5, s * 0.76)], fill=color, width=max(2, s // 12))
-            # 针尖
-            dc.ellipse([s * 0.44, s * 0.72, s * 0.56, s * 0.84], fill=color)
+            dc.ellipse([s * 0.36, s * 0.16, s * 0.48, s * 0.30], fill="white")
+            # 钉身（上宽下窄的梯形）—— 没有这一层的话，圆头 + 细针看起来像气球
+            dc.polygon(
+                [(s * 0.24, s * 0.50), (s * 0.76, s * 0.50),
+                 (s * 0.60, s * 0.68), (s * 0.40, s * 0.68)],
+                fill=color,
+            )
+            # 针（圆头）
+            self._line_round(dc, (s * 0.50, s * 0.66), (s * 0.50, s * 0.90),
+                             color, max(2, s // 14))
         return self._render(draw, master)
 
     def _draw_search(self, color, master):
         def draw(dc, s):
+            w = max(2, s // 12)
             # 镜片（大圆）
-            dc.ellipse([s * 0.14, s * 0.14, s * 0.68, s * 0.68], outline=color, width=max(2, s // 12))
-            # 手柄（45 度线）
-            dc.line([(s * 0.6, s * 0.6), (s * 0.84, s * 0.84)], fill=color, width=max(2, s // 10))
+            dc.ellipse([s * 0.14, s * 0.14, s * 0.68, s * 0.68],
+                       outline=color, width=w)
+            # 手柄（45 度线，圆头）
+            self._line_round(dc, (s * 0.60, s * 0.60), (s * 0.84, s * 0.84),
+                             color, max(2, s // 10))
         return self._render(draw, master)
 
     def _draw_clipboard(self, color, master):
@@ -118,9 +145,41 @@ class IconProvider:
     def _draw_checkmark(self, color, master):
         def draw(dc, s):
             w = max(2, s // 10)
-            # 勾号两笔：左下到中，中到右上
-            dc.line([(s * 0.18, s * 0.52), (s * 0.4, s * 0.76)], fill=color, width=w)
-            dc.line([(s * 0.4, s * 0.76), (s * 0.82, s * 0.24)], fill=color, width=w)
+            # 勾号两笔：左下到中，中到右上（圆头）
+            self._line_round(dc, (s * 0.18, s * 0.52), (s * 0.40, s * 0.76), color, w)
+            self._line_round(dc, (s * 0.40, s * 0.76), (s * 0.82, s * 0.24), color, w)
+        return self._render(draw, master)
+
+    def _draw_refresh(self, color, master):
+        """刷新/重新识别：右上留缺口的圆弧 + 切向箭头。"""
+        import math
+
+        def draw(dc, s):
+            w = max(2, s // 11)
+            pad = s * 0.20
+            cx = cy = s / 2.0
+            r = (s - pad * 2) / 2.0
+            start_deg, end_deg = 318.0, 238.0
+
+            # 圆弧：从 318° 顺时针画到 238°，缺口落在正上方偏右
+            dc.arc([pad, pad, s - pad, s - pad],
+                   start=start_deg, end=end_deg, fill=color, width=w)
+
+            # 箭头：贴在圆弧起点，方向取该点的顺时针切向
+            th = math.radians(start_deg)
+            x = cx + r * math.cos(th)
+            y = cy + r * math.sin(th)
+            ux, uy = -math.sin(th), math.cos(th)      # 单位切向
+            nx, ny = -uy, ux                          # 单位法向
+            length = s * 0.21
+            half = s * 0.10
+            tip = (x + ux * length * 0.45, y + uy * length * 0.45)
+            b1 = (x - ux * length * 0.55 + nx * half,
+                  y - uy * length * 0.55 + ny * half)
+            b2 = (x - ux * length * 0.55 - nx * half,
+                  y - uy * length * 0.55 - ny * half)
+            dc.polygon([tip, b1, b2], fill=color)
+
         return self._render(draw, master)
 
 
