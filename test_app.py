@@ -290,3 +290,40 @@ def test_translator_migration_is_explicit(tmp_path, monkeypatch):
 
     # 目标已存在时不得重复迁移
     assert t.migrate_legacy_history() is False
+
+
+def test_translator_does_not_import_the_heavy_engine_at_module_level(tmp_path):
+    """回归防护：translator 模块不得在导入期加载 translators。
+
+    translators 的依赖树极重：实测 import 耗时约 **2.4 秒**、工作集 **+48MB**，
+    占整个程序内存的 80%（它一次拖进 aiohttp / httpx / niquests / requests
+    四套 HTTP 客户端，外加 cryptography、lxml、multiprocess、psutil 等）。
+    而翻译只是 OCR 之后的次要功能，多数会话根本用不到。
+
+    一旦有人在 translator.py 顶层写回 ``import translators``，
+    每次启动都会白付这份内存和 2.4 秒延迟。
+
+    必须开子进程验证：同进程内 translators 可能已被别的测试导入，断言会失真。
+    用临时 APPDATA 保证不碰用户真实配置目录。
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "import translator\n"
+        "assert 'translators' not in sys.modules, "
+        "'translators 在 translator 模块导入期就被加载了'\n"
+        "assert translator._translators_module is None, "
+        "'延迟加载缓存不应在导入期被填充'\n"
+        "print('OK')\n"
+    )
+    env = dict(os.environ, APPDATA=str(tmp_path), PYTHONIOENCODING="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, timeout=180,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        env=env,
+    )
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert "OK" in result.stdout

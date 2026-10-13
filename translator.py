@@ -1,11 +1,27 @@
-import translators as ts
-import threading
 import json
 import os
 import shutil
+import threading
 from datetime import datetime
 
 from config import config_manager
+
+
+# translators 的依赖树极重：实测 import 耗时约 2.4 秒、工作集 +48MB，
+# 占整个程序内存的 80% —— 它一次拖进 aiohttp / httpx / niquests / requests
+# 四套 HTTP 客户端，外加 cryptography、lxml、multiprocess、psutil 等 40 多个包。
+# 而翻译只是 OCR 之后的次要功能，多数会话根本用不到，因此改为首次翻译时才导入。
+# 注意：**不要**在模块顶层 import translators，那会让每次启动都白付这份开销。
+_translators_module = None
+
+
+def _translators():
+    """延迟加载 translators，只在真正需要翻译时才付那份内存与时间。"""
+    global _translators_module
+    if _translators_module is None:
+        import translators
+        _translators_module = translators
+    return _translators_module
 
 
 class Translator:
@@ -110,6 +126,13 @@ class Translator:
                 self._save_history(text, text, detected, to_lang)
                 return text
             from_lang = detected
+
+        try:
+            ts = _translators()
+        except Exception as e:
+            error_msg = f"翻译引擎不可用（translators 未安装或加载失败）: {e}"
+            print(error_msg)
+            raise Exception(error_msg) from e
 
         try:
             # 自动映射通用语言代码
