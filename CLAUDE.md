@@ -143,7 +143,7 @@ pytest>=7.0.0        # 单元测试框架
 ## 测试与验证
 
 ```bash
-pytest test_app.py test_integration.py test_pin_logic.py   # 28 个用例
+pytest test_app.py test_integration.py test_pin_logic.py   # 30 个用例
 python verify_app.py                                       # 环境自检，失败返回非零退出码
 ```
 
@@ -161,4 +161,6 @@ python verify_app.py                                       # 环境自检，失�
 - **translators 超时**：`translator.py` 设 `timeout=15` 防止网络卡死。
 - **PyInstaller hidden imports**：`pytesseract`、`translators`、`PIL.ImageTk` 等库动态导入，需要显式 `--hidden-import`。
 - **热键兼容性**：使用 pynput 库实现全局热键，兼容无管理员权限的受限环境。
+- **Tesseract 子进程必须无控制台窗口**：本程序是 GUI 进程（`pythonw` / PyInstaller `--noconsole`），自身没有控制台。这类进程 spawn 一个**控制台子系统**程序时，Windows 会为子进程新建一个控制台窗口；用裸 `subprocess` 调用时该窗口**可见**，用户看到的就是「识别时一个空白小窗口一闪而过」。实测（由子进程自报 `GetConsoleWindow` + `IsWindowVisible`）：裸调用 → 有控制台且**可见**；`STARTF_USESHOWWINDOW`+`SW_HIDE` → 有控制台但不可见；`CREATE_NO_WINDOW` → 根本不创建控制台。**只有 `CREATE_NO_WINDOW` 可靠**。pytesseract 仅在 `run_tesseract()` 里做了抑制，而 `get_tesseract_version()` / `get_languages()` 是裸调用 —— 因此 `ocr_engine` 在 import 时把 `pytesseract.pytesseract.subprocess` 整体替换成 `_HiddenSubprocess`（注入 `creationflags=CREATE_NO_WINDOW`）。`test_app.py::test_tesseract_subprocess_never_creates_a_console_window` 是这条的回归防护，不要删除或简化。
+- **`is_available()` 必须缓存**：OCR 窗口每次识别都会调用它，而它内部走 `pytesseract.get_tesseract_version()` —— 那是一次真实的 tesseract 进程 spawn。不缓存时每次识别要多花约 **500ms**（其中大部分是创建控制台窗口的开销；修复后约 60ms）。`ocr_engine._availability_cache` 以 tesseract 可执行文件路径为键，用户在「指定路径」引导里改过路径后会立刻重新检查，无需重启。
 - **pandas 体积陷阱**：`pytesseract` 会 `try: import pandas`（仅服务于 `Output.DATAFRAME`，本项目用不到）。一旦运行环境装了 pandas，就会连带载入 numpy + OpenBLAS，实测多占 **约 63MB 工作集 / 528MB 私有内存 / 23 个线程**。`build_exe.py` 里的 `--exclude-module=pandas` 是安全的（pytesseract 的导入有 try/except 保护），不要移除；开发环境同样建议使用不含 pandas 的 venv。

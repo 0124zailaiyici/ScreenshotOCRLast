@@ -168,6 +168,83 @@ def test_ocr_success_path_returns_engine_text(monkeypatch):
     assert TesseractBackend().recognize(Image.new('RGB', (60, 20), color='white')) == "hello"
 
 
+def test_tesseract_subprocess_never_creates_a_console_window(monkeypatch):
+    """回归防护：Tesseract 子进程必须用 CREATE_NO_WINDOW 启动。
+
+    本程序是 GUI 进程（pythonw / PyInstaller --noconsole），自身没有控制台。
+    这类进程用**裸** subprocess 调用 spawn 控制台程序时，Windows 会为子进程
+    新建一个**可见**的控制台窗口 —— 用户看到的就是「识别时一个空白小窗口一闪而过」。
+
+    pytesseract 只在 run_tesseract() 里设了 STARTF_USESHOWWINDOW + SW_HIDE，
+    而 get_tesseract_version() / get_languages() 是裸调用。实测（由子进程自报
+    GetConsoleWindow）：裸调用 -> 可见控制台；SW_HIDE -> 有控制台但不可见；
+    CREATE_NO_WINDOW -> 根本不创建控制台。所以必须注入 CREATE_NO_WINDOW。
+    """
+    import subprocess as sp
+
+    import pytesseract.pytesseract as _pt
+
+    import ocr_engine
+
+    # pytesseract 内部的 subprocess 必须已被替换成注入版本
+    assert isinstance(_pt.subprocess, ocr_engine._HiddenSubprocess)
+
+    # 真正走到 Popen 时必须带上 CREATE_NO_WINDOW
+    seen = {}
+
+    def spy_popen(*args, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop before actually spawning")
+
+    monkeypatch.setattr(sp, "Popen", spy_popen)
+
+    with pytest.raises(RuntimeError):
+        _pt.subprocess.check_output(["tesseract", "--version"])
+
+    assert seen.get("creationflags") == sp.CREATE_NO_WINDOW
+    assert seen.get("startupinfo") is not None
+
+
+def test_is_available_is_cached_per_tesseract_path(monkeypatch):
+    """回归防护：is_available() 必须缓存。
+
+    OCR 窗口每次识别都会调用它，不缓存就要多 spawn 一次 tesseract
+    （实测约 500ms），让 OCR 总耗时凭空翻倍。
+    """
+    import pytesseract
+
+    import ocr_engine
+
+    ocr_engine._availability_cache.clear()
+    calls = []
+
+    def fake_version():
+        calls.append(1)
+        return "5.5.0"
+
+    monkeypatch.setattr(pytesseract, "get_tesseract_version", fake_version)
+    monkeypatch.setattr(
+        ocr_engine.config_manager, "get",
+        lambda key, default=None: r"X:\tesseract.exe" if key == "tesseract_path" else default,
+    )
+
+    try:
+        engine = ocr_engine.TesseractBackend()
+        assert engine.is_available() is True
+        assert engine.is_available() is True
+        assert len(calls) == 1, "第二次调用必须命中缓存，不能再 spawn 一次 tesseract"
+
+        # 路径变化时必须重新检查（用户在「指定路径」引导里改过 tesseract.exe）
+        monkeypatch.setattr(
+            ocr_engine.config_manager, "get",
+            lambda key, default=None: r"Y:\tesseract.exe" if key == "tesseract_path" else default,
+        )
+        assert ocr_engine.TesseractBackend().is_available() is True
+        assert len(calls) == 2
+    finally:
+        ocr_engine._availability_cache.clear()
+
+
 def test_ocr_error_kind_classification():
     """错误必须被正确归类，UI 才能给出对应的修复引导"""
     from ocr_engine import TesseractBackend
