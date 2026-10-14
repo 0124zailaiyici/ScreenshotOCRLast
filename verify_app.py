@@ -123,14 +123,19 @@ def check_icon_rendering():
 
 
 def check_ocr_engine_factory():
-    from ocr_engine import create_ocr_engine, OcrError
+    from ocr_engine import DEFAULT_BACKEND, create_ocr_engine, OcrError
 
-    engine = create_ocr_engine("tesseract")
-    if engine.name != "tesseract":
-        raise AssertionError(f"工厂返回了非预期后端: {engine.name}")
-    if not hasattr(engine, "recognize"):
-        raise AssertionError("后端缺少 recognize 接口")
-    return "工厂与接口正常"
+    for name in ("tesseract", "rapidocr"):
+        engine = create_ocr_engine(name)
+        if engine.name != name:
+            raise AssertionError(f"工厂返回了非预期后端: {engine.name}（请求 {name}）")
+        if not hasattr(engine, "recognize"):
+            raise AssertionError(f"{name} 后端缺少 recognize 接口")
+
+    # 配置写坏时不该让识字功能整体不可用，回落到默认后端即可
+    if create_ocr_engine("no_such_engine").name != DEFAULT_BACKEND:
+        raise AssertionError("未知后端名没有回落到默认后端")
+    return "工厂与接口正常，未知后端名可回落"
 
 
 def check_tesseract_available():
@@ -140,6 +145,28 @@ def check_tesseract_available():
     if not engine.is_available():
         raise SkipCheck("Tesseract 未安装或路径未配置，OCR 功能不可用")
     return "Tesseract 可用"
+
+
+def check_rapidocr_available():
+    """RapidOCR 是默认引擎，所以它必须真的能跑 —— 不只是模块在。
+
+    模块在、但三个 ONNX 模型没打进来，是打包时最容易犯的错（`--collect-data`
+    漏了数据文件），而它的表现是"程序能启动、能切引擎，一识别就报模型找不到"。
+    这里真的构造一次引擎并识别一张小图，把模型能不能加载也验掉。
+    """
+    from PIL import Image
+
+    from ocr_engine import create_ocr_engine
+
+    engine = create_ocr_engine("rapidocr")
+    if not engine.is_available():
+        raise SkipCheck("RapidOCR 未安装，中文识别将回落到 Tesseract")
+
+    # 构造引擎会真的读三个 ONNX 模型，模型缺失就在这里炸
+    text = engine.recognize(Image.new("RGB", (120, 40), color="white"))
+    if not isinstance(text, str):
+        raise AssertionError(f"recognize() 应返回字符串，实际是 {type(text).__name__}")
+    return "RapidOCR 可用，模型可加载"
 
 
 def check_ocr_language_packs():
@@ -263,6 +290,7 @@ CHECKS = [
     ("图标渲染", check_icon_rendering),
     ("OCR 引擎工厂", check_ocr_engine_factory),
     ("Tesseract 可用", check_tesseract_available),
+    ("RapidOCR 可用", check_rapidocr_available),
     ("OCR 语言包", check_ocr_language_packs),
     ("OCR 错误契约", check_ocr_error_contract),
     ("剪贴板文字", check_clipboard_text),

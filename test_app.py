@@ -15,7 +15,7 @@ from PIL import Image
 def test_config_defaults_are_stable(isolated_config):
     """默认配置项必须与文档一致"""
     assert isolated_config.get("hotkey") == "<alt>+x"
-    assert isolated_config.get("ocr_backend") == "tesseract"
+    assert isolated_config.get("ocr_backend") == "rapidocr"
     assert isolated_config.get("ocr_lang") == "chi_sim+eng"
     assert isolated_config.get("notification_enabled") is True
 
@@ -362,11 +362,202 @@ def test_translator_does_not_import_the_heavy_engine_at_module_level(tmp_path):
     result = subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True, text=True, timeout=180,
+        # **必须显式指定 utf-8**：默认走系统区域编码（本机 GBK），子进程里的中文
+        # 断言信息会让 subprocess 自己抛 UnicodeDecodeError，失败原因被掩盖成
+        # 一个看不懂的解码错误 —— 实测踩过。
+        encoding="utf-8", errors="replace",
         cwd=os.path.dirname(os.path.abspath(__file__)),
         env=env,
     )
     assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
     assert "OK" in result.stdout
+
+
+def test_ocr_engine_does_not_import_rapidocr_at_module_level(tmp_path):
+    """回归防护：ocr_engine 模块不得在导入期加载 rapidocr_onnxruntime。
+
+    RapidOCR 拖进 onnxruntime + numpy + 三个 ONNX 模型，给进程加几十 MB 工作集；
+    而只用 Tesseract 的用户根本用不到它。一旦有人在 ocr_engine.py 顶层写
+    ``import rapidocr_onnxruntime``，每次启动都要白付这份内存。
+
+    必须开子进程验证：同进程内它可能已被别的测试导入，断言会失真。
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "import ocr_engine\n"
+        "assert 'rapidocr_onnxruntime' not in sys.modules, "
+        "'rapidocr 在 ocr_engine 导入期就被加载了'\n"
+        "assert 'onnxruntime' not in sys.modules, "
+        "'onnxruntime 在 ocr_engine 导入期就被加载了'\n"
+        "print('OK')\n"
+    )
+    env = dict(os.environ, APPDATA=str(tmp_path), PYTHONIOENCODING="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, timeout=180,
+        # **必须显式指定 utf-8**：默认走系统区域编码（本机 GBK），子进程里的中文
+        # 断言信息会让 subprocess 自己抛 UnicodeDecodeError，失败原因被掩盖成
+        # 一个看不懂的解码错误 —— 实测踩过。
+        encoding="utf-8", errors="replace",
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        env=env,
+    )
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert "OK" in result.stdout
+
+
+def test_ocr_factory_falls_back_for_unknown_backend(isolated_config):
+    """配置写坏（未知后端名）不该让识字功能整体不可用，回落到默认后端即可。"""
+    from ocr_engine import DEFAULT_BACKEND, create_ocr_engine
+
+    engine = create_ocr_engine("no_such_engine")
+    assert engine.name == DEFAULT_BACKEND
+
+
+def test_ocr_factory_reads_config_when_name_is_omitted(isolated_config):
+    """不传后端名时读配置 —— ocr_window 就是靠这个把托盘里的选择接上来的。"""
+    from ocr_engine import create_ocr_engine
+
+    isolated_config.set("ocr_backend", "tesseract")
+    assert create_ocr_engine(None).name == "tesseract"
+    assert create_ocr_engine().name == "tesseract"
+
+    isolated_config.set("ocr_backend", "rapidocr")
+    assert create_ocr_engine(None).name == "rapidocr"
+
+
+def test_available_backends_never_raises(isolated_config):
+    """环境里一个引擎都没装时也要正常返回空列表，而不是抛异常。"""
+    from ocr_engine import available_backends
+
+    names = available_backends()
+    assert isinstance(names, list)
+    assert set(names) <= {"tesseract", "rapidocr"}
+
+
+def test_rapidocr_rebuilds_spaces_between_latin_only():
+    """回归防护：空格重建必须只在拉丁/数字之间插。
+
+    RapidOCR 的识别模型经常吞空格（``pytest60passed``），但传
+    ``return_word_box=True`` 会返回**每个字符**的框，靠框间隙能补回来。
+    实测阈值 0.35 会把 ``passed`` 拆成 ``p assed``、0.6 会把 ``60 passed``
+    粘成 ``60passed``，所以取 0.45。
+
+    **汉字之间绝不能插**：汉字本身字距就宽，无脑插会得到
+    ``真 实 渲 染 截 图 确 认`` 这种废文本（真踩过，中文被整个拆散）。
+    """
+    from ocr_engine import RapidOcrBackend
+
+    def box(x0, x1):
+        return [[x0, 0], [x1, 0], [x1, 20], [x0, 20]]
+
+    # 拉丁词之间留 7px 间隙（字宽 9px）-> 应插一个空格
+    latin_boxes = [box(0, 9), box(9, 19), box(19, 28), box(28, 37),
+                   box(37, 46), box(46, 55), box(62, 72), box(72, 82)]
+    item = [None, "pytest60", 0.9, latin_boxes, list("pytest60"), [0.9] * 8]
+    assert RapidOcrBackend.rebuild_spaces(item) == "pytest 60"
+
+    # 汉字之间**故意给一个超过阈值的间隙**（12px > 字宽 20px × 0.45 = 9px）。
+    # 第一版这里只给了 4px，低于阈值 —— 于是即使把 _is_cjk 改成恒 False，
+    # 测试照样通过，等于什么都没验。这正是"断言恒真"的陷阱。
+    cjk_boxes = [box(0, 20), box(32, 52), box(64, 84), box(96, 116)]
+    item = [None, "真实渲染", 0.9, cjk_boxes, list("真实渲染"), [0.9] * 4]
+    assert RapidOcrBackend.rebuild_spaces(item) == "真实渲染"
+
+
+def test_rapidocr_rebuild_spaces_keeps_units_together():
+    """回归防护：不能在两个单独的大写字母之间插空格（``MB`` 不能被拆成 ``M B``）。
+
+    实测数据：真实空格的间隙是 5~13px，而 ``MB`` 里 M 与 B 之间的 kerning 间隙
+    也是 5~6px —— **数值上完全重叠，靠调阈值分不开**（阈值 0.45 能保住
+    ``60 passed`` 但会拆散 ``MB``，0.6 反过来）。所以专门加了一条有界规则。
+    """
+    from ocr_engine import RapidOcrBackend
+
+    def box(x0, x1):
+        return [[x0, 0], [x1, 0], [x1, 20], [x0, 20]]
+
+    # 每个字宽 10px，间隙 6px（> 10 × 0.45 = 4.5）—— 单看间隙会被判定成空格
+    boxes = [box(0, 10), box(16, 26)]
+    item = [None, "MB", 0.9, boxes, list("MB"), [0.9] * 2]
+    assert RapidOcrBackend.rebuild_spaces(item) == "MB", "MB 被拆成了 M B"
+
+    # 但小写单字母词之间仍然要插（不能把规则做过头）
+    boxes = [box(0, 10), box(16, 26)]
+    item = [None, "ab", 0.9, boxes, list("ab"), [0.9] * 2]
+    assert RapidOcrBackend.rebuild_spaces(item) == "a b", "小写单字母词之间的空格被吞了"
+
+
+def test_rapidocr_rebuild_spaces_returns_raw_text_without_boxes():
+    """拿不到词框（旧版返回 3 元组、或框数与字符数对不上）时必须原样返回，绝不猜。"""
+    from ocr_engine import RapidOcrBackend
+
+    assert RapidOcrBackend.rebuild_spaces([None, "pytest60passed", 0.9]) \
+        == "pytest60passed"
+    # 框数与字符数不一致 -> 不可信，原样返回
+    assert RapidOcrBackend.rebuild_spaces(
+        [None, "ab", 0.9, [[[0, 0], [1, 0], [1, 1], [0, 1]]], list("ab"), [1.0]]
+    ) == "ab"
+    # 全零宽度（除零风险）也要能安全返回
+    zero = [[[0, 0], [0, 0], [0, 0], [0, 0]], [[0, 0], [0, 0], [0, 0], [0, 0]]]
+    assert RapidOcrBackend.rebuild_spaces(
+        [None, "ab", 0.9, zero, list("ab"), [1.0, 1.0]]) == "ab"
+
+
+def test_rapidocr_availability_check_does_not_import_the_module(monkeypatch):
+    """回归防护：``is_available()`` 绝不能靠 import 来判断。
+
+    ``import rapidocr_onnxruntime`` 会连带加载 onnxruntime + numpy，实测给空闲进程
+    加约 36MB 工作集和 18 个线程。而**托盘菜单在构建时就会问一次可用性**（要标注
+    「未安装」），所以只要 ``is_available`` 里写了 import，"懒加载"就被彻底绕过 ——
+    实测过：只是启动程序、什么都没做，工作集就从 50MB 涨到 86MB。
+
+    这条用"模块没装"的场景来验：真实环境里它装着，所以直接断言 `_module` 没被调用。
+    """
+    from ocr_engine import RapidOcrBackend
+
+    called = []
+
+    def boom():
+        called.append(1)
+        raise AssertionError("is_available() 不应该真的导入模块")
+
+    monkeypatch.setattr(RapidOcrBackend, "_module", staticmethod(boom))
+    assert RapidOcrBackend().is_available() is True   # 本机确实装着
+    assert not called, "is_available() 触发了真实导入，懒加载被绕过"
+
+
+def test_rapidocr_backend_reports_unavailable_without_the_module(monkeypatch):
+    """模块没装时 is_available() 必须返回 False 而不是抛异常 —— 托盘菜单靠它标注。"""
+    import importlib.util
+
+    from ocr_engine import RapidOcrBackend
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    assert RapidOcrBackend().is_available() is False
+
+    def missing(name):
+        raise ModuleNotFoundError(f"No module named {name!r}")
+
+    monkeypatch.setattr(importlib.util, "find_spec", missing)
+    assert RapidOcrBackend().is_available() is False
+
+
+def test_rapidocr_backend_wraps_failures_in_ocr_error(monkeypatch):
+    """识别失败必须抛 OcrError，不能把异常漏给调用方（OCR 失败契约）。"""
+    import pytest as _pytest
+
+    from ocr_engine import OcrError, RapidOcrBackend
+
+    backend = RapidOcrBackend()
+    monkeypatch.setattr(backend, "_get_engine",
+                        lambda: (_ for _ in ()).throw(RuntimeError("模型加载失败")))
+
+    with _pytest.raises(OcrError, match="RapidOCR"):
+        backend.recognize(Image.new("RGB", (20, 20), color="white"))
 
 
 def test_translator_pins_the_region_before_importing_translators(monkeypatch):

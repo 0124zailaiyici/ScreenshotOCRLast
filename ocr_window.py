@@ -23,6 +23,7 @@ from tkinter import filedialog, messagebox
 from clipboard_manager import clipboard_manager
 from config import config_manager
 from ocr_engine import OcrError, create_ocr_engine
+import ocr_engine
 from translator import translator
 from ui_icons import icons
 from ui_theme import (
@@ -95,7 +96,8 @@ class OcrWindow:
         self._scale = dpi_scale(self.root)
         self._make_frameless()
 
-        self.result = {"done": False, "text": "", "error": None, "error_kind": None}
+        self.result = {"done": False, "text": "", "error": None, "error_kind": None,
+                       "error_engine": None, "engine": None, "note": None}
         self.translations = {}
         self.current_lang = "raw"
 
@@ -430,14 +432,25 @@ class OcrWindow:
         self.lbl_view.config(text=view if view is not None else "")
 
     def _update_status(self):
-        """识别完成后刷新状态栏：字数 + 耗时 + 当前显示的是哪种文本。"""
+        """识别完成后刷新状态栏：字数 + 耗时 + 用的引擎 + 当前显示的是哪种文本。
+
+        引擎名要显示出来，用户才知道这次结果是谁给的 —— 两个引擎的中文正确率
+        差别很明显，不标出来就没法判断该不该切。
+        """
         text = self.result.get("text") or ""
         chars = len("".join(text.split()))
         parts = [f"{chars} 字"]
         if self._elapsed is not None:
             parts.append(f"识别耗时 {self._elapsed:.2f}s")
+        if self.result.get("engine"):
+            parts.append(ocr_engine.backend_label(self.result["engine"]))
+        # 自动降级过就把原因顶到最前面，别让用户以为配置生效了
+        note = self.result.get("note")
+        status = " · ".join(parts)
+        if note:
+            status = f"{note} · {status}"
         view = {"raw": "原文", "zh": "中文", "en": "EN"}.get(self.current_lang, "")
-        self._set_status(" · ".join(parts), view)
+        self._set_status(status, view)
 
     # ------------------------------------------------------------------ OCR
 
@@ -445,16 +458,32 @@ class OcrWindow:
         """后台线程：只写 self.result，绝不碰 Tkinter。"""
         started = time.monotonic()
         try:
-            engine = create_ocr_engine(config_manager.get("ocr_backend"))
+            requested = (config_manager.get("ocr_backend")
+                         or ocr_engine.DEFAULT_BACKEND)
+            engine = create_ocr_engine(requested)
+
             if not engine.is_available():
-                self.result["error"] = "Tesseract 未安装或不在环境变量中"
-                self.result["error_kind"] = "not_found"
-                self.result["done"] = True
-                return
+                # 配置的引擎起不来时自动退到另一个可用引擎，而不是直接报错：
+                # 用户不该因为某一个引擎没装好就完全没法识字。
+                engine = self._fallback_engine(requested)
+                if engine is None:
+                    self.result["error"] = (
+                        f"{ocr_engine.backend_label(requested)} 不可用，"
+                        "且没有其它可用的识别引擎"
+                    )
+                    self.result["error_kind"] = "not_found"
+                    self.result["error_engine"] = requested
+                    self.result["done"] = True
+                    return
+                self.result["note"] = (
+                    f"{ocr_engine.backend_label(requested)} 不可用，"
+                    f"已自动改用 {ocr_engine.backend_label(engine.name)}"
+                )
 
             text = engine.recognize(self.image)
             self.result["text"] = text
             self.result["elapsed"] = time.monotonic() - started
+            self.result["engine"] = engine.name
             self.result["done"] = True
         except OcrError as e:
             self.result["error"] = str(e)
@@ -465,9 +494,18 @@ class OcrWindow:
             self.result["error_kind"] = "other"
             self.result["done"] = True
 
+    @staticmethod
+    def _fallback_engine(requested):
+        """找一个不是 ``requested`` 的可用引擎；都没有则返回 None。"""
+        for name in ocr_engine.available_backends():
+            if name != requested:
+                return create_ocr_engine(name)
+        return None
+
     def _retry_ocr(self):
         """重新识别同一张图（识别错了不用重新截图）。"""
-        self.result.update(done=False, text="", error=None, error_kind=None, elapsed=None)
+        self.result.update(done=False, text="", error=None, error_kind=None,
+                           error_engine=None, engine=None, note=None, elapsed=None)
         self.translations.clear()
         self.current_lang = "raw"
         self._elapsed = None
@@ -506,16 +544,24 @@ class OcrWindow:
         self._update_status()
 
     def _show_error(self):
-        theme = theme_manager.theme
         error_msg = self.result["error"]
         kind = self.result.get("error_kind") or "other"
+        # 哪个引擎挂了决定给什么引导 —— 只有 Tesseract 才谈得上「指定 exe 路径」。
+        failed = self.result.get("error_engine") or "tesseract"
 
-        if kind == "not_found":
+        if kind == "not_found" and failed == "tesseract":
             hint = (
                 "原因：系统未找到 Tesseract 引擎。\n"
                 "解决办法：\n"
                 "1. 前往 https://github.com/UB-Mannheim/tesseract/wiki 下载并安装。\n"
                 "2. 若已安装，请在下方对话框中手动指定 tesseract.exe 路径。"
+            )
+        elif kind == "not_found":
+            hint = (
+                f"原因：系统未找到 {ocr_engine.backend_label(failed)} 引擎。\n"
+                "解决办法：\n"
+                "1. 在托盘菜单里切换到另一个识别引擎。\n"
+                "2. 或重新安装完整版本（RapidOCR 的模型随程序一起打包）。"
             )
         elif kind == "lang_pack":
             hint = (
@@ -525,14 +571,14 @@ class OcrWindow:
                 "2. 或把对应的 .traineddata 文件放入 tessdata 目录。"
             )
         else:
-            hint = "请检查 Tesseract 安装与配置后重试。"
+            hint = f"请检查 {ocr_engine.backend_label(failed)} 安装与配置后重试。"
 
         self._set_text(f"识别失败: {error_msg}\n\n{hint}", tag="error")
         self._set_status("识别失败")
 
-        # 只有确实找不到引擎时才引导用户重新指定路径，
-        # 否则（例如缺语言包）弹路径选择框会误导用户。
-        if kind != "not_found":
+        # 只有确实找不到 **Tesseract** 引擎时才引导用户重新指定路径，
+        # 否则（缺语言包、RapidOCR 模型缺失）弹路径选择框会误导用户。
+        if kind != "not_found" or failed != "tesseract":
             return
 
         if messagebox.askyesno(
@@ -545,7 +591,8 @@ class OcrWindow:
             )
             if path:
                 config_manager.set("tesseract_path", path)
-                self.result.update(done=False, error=None, error_kind=None)
+                self.result.update(done=False, error=None, error_kind=None,
+                                   error_engine=None)
                 self._set_text("正在识别…")
                 self._set_status("正在识别…")
                 threading.Thread(target=self._do_ocr, daemon=True).start()

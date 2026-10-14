@@ -2,6 +2,7 @@ import pystray
 from PIL import Image, ImageDraw
 import threading
 from config import config_manager
+import ocr_engine
 
 class TrayApp:
     """系统托盘应用：管理右键菜单和通知"""
@@ -49,6 +50,52 @@ class TrayApp:
         if self.on_exit:
             self.on_exit()
 
+    # -------------------------------------------------------------- 识别引擎
+
+    @staticmethod
+    def _engine_available(name):
+        try:
+            return ocr_engine.create_ocr_engine(name).is_available()
+        except Exception:
+            return False
+
+    def _engine_text(self, name):
+        """菜单项文案：把「未安装」直接标出来，别让用户切过去才发现用不了。"""
+        def text(item):
+            suffix = "" if self._engine_available(name) else "（未安装）"
+            return f"{ocr_engine.backend_label(name)}{suffix}"
+        return text
+
+    def _engine_checked(self, name):
+        def checked(item):
+            return (config_manager.get("ocr_backend")
+                    or ocr_engine.DEFAULT_BACKEND) == name
+        return checked
+
+    def _make_engine_handler(self, name):
+        def handler(icon, item):
+            config_manager.set("ocr_backend", name)
+            self.notify("识别引擎",
+                        f"已切换到 {ocr_engine.backend_label(name)}")
+        return handler
+
+    def _engine_menu(self):
+        """识别引擎子菜单。
+
+        两个引擎的取舍不是"哪个更好"而是"哪个更合适"（见
+        ``ocr_engine.RapidOcrBackend`` 的类注释）：RapidOCR 中文几乎不出错但会吞
+        拉丁文的空格，Tesseract 保留空格但中文会认错字。所以必须让用户能随手切。
+        """
+        return pystray.Menu(*[
+            pystray.MenuItem(
+                self._engine_text(name),
+                self._make_engine_handler(name),
+                checked=self._engine_checked(name),
+                radio=True,
+            )
+            for name in ocr_engine.FALLBACK_ORDER
+        ])
+
     def notify(self, title, message):
         """发送系统通知"""
         if config_manager.get("notification_enabled") and self.icon:
@@ -58,6 +105,8 @@ class TrayApp:
         """运行托盘主循环"""
         menu = pystray.Menu(
             pystray.MenuItem("立即截图 (Alt+X)", self._on_screenshot_click),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("识别引擎", self._engine_menu()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", self._on_exit_click)
         )

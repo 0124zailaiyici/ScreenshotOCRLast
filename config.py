@@ -51,7 +51,7 @@ class ConfigManager:
         """返回默认配置项"""
         return {
             "hotkey": "<alt>+x",  # 全局截图热键
-            "ocr_backend": "tesseract",    # 默认 OCR 后端
+            "ocr_backend": "rapidocr",     # 默认 OCR 后端（见 ocr_engine.DEFAULT_BACKEND）
             "ocr_lang": "chi_sim+eng",     # 识别语言：限定简中+英文
             "tesseract_path": "",          # Tesseract 可执行文件路径
             "auto_copy_text": False,       # 彻底禁用自动复制文本行为

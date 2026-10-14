@@ -30,11 +30,31 @@ REQUIRED_MODULES = [
     # 3. translators 的依赖树（翻译功能必需，动态导入，最容易被漏）
     "translators", "cryptography", "lxml", "certifi",
     "requests", "aiohttp", "httpx", "niquests",
+    # 4. RapidOCR 后端（ocr_engine 里是函数内 import，静态分析跟不到）
+    "rapidocr_onnxruntime", "onnxruntime", "numpy",
+]
+
+#: RapidOCR 的 ONNX 模型是**数据文件**而不是模块，模块名检查看不到它们。
+#: 漏掉的表现是"程序能启动、托盘能切引擎，一识别就报模型找不到"，
+#: 所以必须单独验。
+#:
+#: **名字必须写成归一化后的点分形式**（见 ``_read_bundled_entries``：CArchive 里
+#: 的路径分隔符会被换成点）。第一版这里写的是 ``rapidocr_onnxruntime/models/...``
+#: 带斜杠，于是模型明明打进去了却报"缺失" —— 自检自己也会写错，写完要拿真实
+#: 产物对一遍。
+REQUIRED_DATA = [
+    "rapidocr_onnxruntime.models.ch_PP-OCRv4_det_infer.onnx",
+    "rapidocr_onnxruntime.models.ch_PP-OCRv4_rec_infer.onnx",
+    "rapidocr_onnxruntime.models.ch_ppocr_mobile_v2.0_cls_infer.onnx",
 ]
 
 # 明确排除的包：出现了就说明 --exclude-module 没生效（pandas 会连带 numpy+OpenBLAS，
-# 实测多占约 63MB 工作集）
-FORBIDDEN_MODULES = ["pandas", "numpy", "matplotlib", "scipy", "torch"]
+# 实测多占约 63MB 工作集）。
+#
+# **numpy 不在这个名单里**：onnxruntime 硬依赖 numpy，排掉它等于把 RapidOCR 后端
+# 一起排掉。pandas 仍然要排 —— pytesseract 会 try: import pandas，而本项目用不到
+# 它的 DataFrame 输出（导入有 try/except 保护，排掉是安全的）。
+FORBIDDEN_MODULES = ["pandas", "matplotlib", "scipy", "torch"]
 
 
 def _read_bundled_modules(exe_path):
@@ -68,8 +88,26 @@ def _read_bundled_modules(exe_path):
     return names
 
 
+def _read_bundled_entries(exe_path):
+    """读出 exe 里**所有**条目（PYZ 模块 + 顶层文件），名字已归一化成点分形式。
+
+    数据文件（例如 RapidOCR 的 .onnx 模型）走的就是这条路径 —— 它们不是模块，
+    ``_read_bundled_modules`` 看不到。
+    """
+    from PyInstaller.archive.readers import CArchiveReader
+
+    reader = CArchiveReader(exe_path)
+    entries = set()
+    for name in reader.toc:
+        if name.lower().endswith(".pyz"):
+            entries |= set(reader.open_embedded_archive(name).toc)
+            continue
+        entries.add(name.replace("\\", ".").replace("/", "."))
+    return entries
+
+
 def verify_build(exe_path):
-    """打包后自检：关键模块在不在、该排除的在不在。
+    """打包后自检：关键模块在不在、该排除的在不在、模型文件在不在。
 
     :return: 通过返回 True
     """
@@ -85,6 +123,7 @@ def verify_build(exe_path):
 
     try:
         modules = _read_bundled_modules(exe_path)
+        entries = _read_bundled_entries(exe_path)
     except Exception as e:
         print(f"\n自检失败: 无法读取包内容 ({e})")
         print("=" * 30)
@@ -93,6 +132,7 @@ def verify_build(exe_path):
     print(f"\n包内模块总数: {len(modules)}")
     missing = [m for m in REQUIRED_MODULES if m not in modules]
     forbidden = [m for m in FORBIDDEN_MODULES if m in modules]
+    missing_data = [d for d in REQUIRED_DATA if d not in entries]
     if missing:
         print("\n自检失败: 以下必需模块没有被打进包 ——")
         for m in missing:
@@ -104,12 +144,18 @@ def verify_build(exe_path):
         for m in forbidden:
             print(f"  - {m}")
         print("处理方式: 检查 params 里的 --exclude-module 是否还有效。")
+    if missing_data:
+        print("\n自检失败: 以下数据文件没有被打进包 ——")
+        for d in missing_data:
+            print(f"  - {d}")
+        print("这些是 RapidOCR 的 ONNX 模型，缺了会导致「一识别就报模型找不到」。")
+        print("处理方式: 检查 params 里的 --collect-data=rapidocr_onnxruntime 是否还在。")
 
-    if missing or forbidden:
+    if missing or forbidden or missing_data:
         print("=" * 30)
         return False
 
-    print("自检通过: 必需模块齐全，排除项也没漏进来。")
+    print("自检通过: 必需模块齐全，模型文件齐全，排除项也没漏进来。")
     print("=" * 30)
     return True
 
@@ -140,13 +186,26 @@ def build():
         '--hidden-import=ui_widgets',
         '--hidden-import=ui_icons',
 
-        # 排除不必要的超大库以减小体积
+        # RapidOCR 后端：ocr_engine 里是函数内 import，静态分析跟不到。
+        # 模型是**数据文件**，必须用 --collect-data 显式带上，否则打出来的包
+        # 能启动、能切引擎，一识别就报找不到模型。
+        '--hidden-import=rapidocr_onnxruntime',
+        '--hidden-import=onnxruntime',
+        '--collect-data=rapidocr_onnxruntime',
+
+        # 排除不必要的超大库以减小体积。
+        # **不要在这里加 numpy** —— onnxruntime 硬依赖它。
         '--exclude-module=matplotlib',
         '--exclude-module=notebook',
         '--exclude-module=pandas',
         '--exclude-module=scipy',
         '--exclude-module=torch',
         '--exclude-module=setuptools',
+        # onnxruntime 里与「推理」无关的子模块：模型转换与量化工具，本项目用不到。
+        # 只占几 MB，但白拿。
+        '--exclude-module=onnxruntime.transformers',
+        '--exclude-module=onnxruntime.quantization',
+        '--exclude-module=onnxruntime.tools',
     ]
 
     try:

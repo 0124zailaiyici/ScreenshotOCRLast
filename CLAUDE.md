@@ -10,6 +10,7 @@ Windows 截图工具，支持截图后三选一操作：钉住到屏幕、OCR �
 - **pywin32** Windows 剪贴板操作
 - **pynput** 全局热键（非注册表方式）
 - **pytesseract** OCR 识别（需独立安装 Tesseract-OCR 5.x）
+- **rapidocr-onnxruntime** OCR 识别（中文准确率更高，模型随程序打包，无需外部安装）
 - **translators** 中英翻译
 - **PyInstaller** 打包为单文件 exe
 
@@ -47,7 +48,7 @@ Windows 截图工具，支持截图后三选一操作：钉住到屏幕、OCR �
 ├── pin_window.py             # 钉住浮窗
 ├── ocr_window.py             # OCR 文字识别窗口 + 翻译
 ├── translator.py             # 翻译模块 (translators 库)
-├── ocr_engine.py             # OcrBackend 抽象 + TesseractBackend + OcrError + 工厂
+├── ocr_engine.py             # OcrBackend 抽象 + TesseractBackend + RapidOcrBackend + OcrError + 工厂
 ├── clipboard_manager.py      # 剪贴板 (pywin32 CF_DIB/CF_UNICODETEXT)
 ├── hotkey_listener.py        # 全局热键 (pynput)
 ├── tray_app.py               # 系统托盘 (pystray)
@@ -84,7 +85,23 @@ poll_result()
 
 ### OCR 引擎抽象
 
-所有的 OCR 后端实现 `OcrBackend` 接口（`recognize()`、`is_available()`、`name`），通过 `ocr_engine.create_ocr_engine()` 工厂创建。
+所有的 OCR 后端实现 `OcrBackend` 接口（`recognize()`、`is_available()`、`name`），通过 `ocr_engine.create_ocr_engine(backend_name=None)` 工厂创建。传 `None` 时读 `config_manager.get("ocr_backend")`；**名字未知时回落到 `DEFAULT_BACKEND`**，而不是抛异常 —— 配置写坏不该让识字功能整体不可用。
+
+目前两个后端，**默认 RapidOCR**（`DEFAULT_BACKEND`），托盘菜单「识别引擎」里可切换（单选），选择写回配置：
+
+| | RapidOCR | Tesseract |
+|---|---|---|
+| 中文 | **正确**（`真实渲染`） | 错字（`真实泻染`、`自检`→`目检`） |
+| 拉丁/数字 | 对，但会吞空格（靠 `rebuild_spaces` 补） | 对，空格保留 |
+| 用户真实难图相似度 | **100.0%** | 96.9% |
+| 速度 | 约 1.2s | 约 0.5s |
+| 依赖 | 模型随程序打包（+81MB） | 需外部安装 Tesseract 5.x |
+| 预处理 | **不做任何预处理**（2x 放大会掉到 77.1%） | 灰度 → 2x BICUBIC → Otsu |
+
+- **`RapidOcrBackend` 必须懒加载**：`import rapidocr_onnxruntime` 写在 `_module()` 里，`_get_engine()` 才真正构造 `RapidOCR()`（构造要读三个 ONNX 模型，很慢）。详见下方「`is_available()` 绝不能用 `import` 来判断」。
+- **`rebuild_spaces` 只补拉丁/数字之间的空格**，汉字之间**绝不能插**（汉字字距本来就宽，无脑插会得到 `真 实 渲 染`）。阈值 `GAP_RATIO=0.45` / `MIN_GAP_PX=2` 是实测扫出来的（0.35 把 `passed` 拆成 `p assed`，0.6 把 `60 passed` 粘成 `60passed`）。另外有一条 `_is_unit_split` 规则：**不在两个单独的大写字母之间插**（`36.16MB` 的 M-B 间隙 5~6px 与真实空格 5~13px **数值上完全重叠**，纯阈值分不开）。
+- **`return_word_box=True` 必须传给 `__call__`，不能传给构造函数**（`main.py:82` 读的是 `kwargs.get("return_word_box", False)`），否则拿不到字符框，`rebuild_spaces` 直接失效。
+- **`ocr_window._do_ocr` 会自动降级**：请求的引擎不可用时按 `FALLBACK_ORDER` 换下一个，并在状态栏标注「已降级」与降级原因。失败时 `result["error_engine"]` 记下是哪个引擎失败的 —— 只有 `kind == "not_found"` **且失败的是 Tesseract** 才弹「指定 tesseract.exe 路径」引导。
 
 ## 配置项
 
@@ -96,7 +113,7 @@ poll_result()
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
 | `hotkey` | `<alt>+x` | 全局快捷键 |
-| `ocr_backend` | `tesseract` | OCR 引擎 |
+| `ocr_backend` | `rapidocr` | OCR 引擎（`rapidocr` / `tesseract`，见 `ocr_engine.BACKEND_LABELS`） |
 | `ocr_lang` | `chi_sim+eng` | 识别语言 |
 | `tesseract_path` | `""` | Tesseract 路径（空则自动查找） |
 | `auto_copy_text` | `false` | 自动复制文本（已废弃，保持 false） |
@@ -123,42 +140,55 @@ pyinstaller --noconsole --onefile --name "ScreenshotOCR" \
   --hidden-import PIL.ImageTk \
   --hidden-import ui_theme \
   --hidden-import ui_icons \
+  --hidden-import rapidocr_onnxruntime \
+  --hidden-import onnxruntime \
+  --collect-data rapidocr_onnxruntime \
   main.py
 ```
 
 配置存放在 `%APPDATA%`，**不需要**再往 `dist/` 复制配置文件。
 
-打包务必使用不含 pandas/numpy 的干净 venv，原因见下方「pandas 体积陷阱」。
+打包务必使用不含 pandas 的干净 venv，原因见下方「pandas 体积陷阱」。**但 numpy 必须装着** —— onnxruntime 硬依赖它。
 
 ### 构建后自检（`build_exe.py` 已内置，不要绕过）
 
 `build_exe.py` 在打包结束后会读回产物、核对模块清单，不合格就 `exit(1)`：
 
 - `REQUIRED_MODULES` 里的模块必须都在包里。**新增本项目模块后要往这里加**；
-- `FORBIDDEN_MODULES`（pandas / numpy / matplotlib / scipy / torch）必须都不在包里。
+- `REQUIRED_DATA` 里的**数据文件**必须都在包里（目前是 RapidOCR 的三个 ONNX 模型 + `config.yaml`）；
+- `FORBIDDEN_MODULES`（pandas / matplotlib / scipy / torch）必须都不在包里。**numpy 不在这个名单里** —— 它是 onnxruntime 的硬依赖，排掉它等于把 RapidOCR 后端一起排掉。
 
-**为什么需要这道检查**：EXE 体积曾在两次构建之间从 **36MB 掉到 29MB**，事后产物被覆盖、无法复原，查不出究竟少了什么。体积变化本身无所谓，**静默少打模块才是问题** —— 最可疑的是 `translators` 的依赖树（`cryptography` / `lxml` / `qh3` / 四套 HTTP 客户端，合计约 7MB），它们全是动态导入，漏掉的后果是"翻译在 exe 里直接坏掉，但打包过程一切正常"。当前构建是**确定性**的（连测两次都是 36.15MB）。
+**为什么需要这道检查**：EXE 体积曾在两次构建之间从 **36MB 掉到 29MB**，事后产物被覆盖、无法复原，查不出究竟少了什么。体积变化本身无所谓，**静默少打模块才是问题** —— 最可疑的是 `translators` 的依赖树（`cryptography` / `lxml` / `qh3` / 四套 HTTP 客户端，合计约 7MB），它们全是动态导入，漏掉的后果是"翻译在 exe 里直接坏掉，但打包过程一切正常"。这道检查**真的拦下过东西**：第一次把 RapidOCR 打进去时 `--collect-data` 漏了模型，自检直接报「数据文件没打进包」并 `exit(1)`。
+
+**模型文件必须靠 `--collect-data` 带**：`ocr_engine` 里 `import rapidocr_onnxruntime` 写在函数内，PyInstaller 的静态分析跟不到；而 `.onnx` 是**数据文件**，`--hidden-import` 只管模块、不管数据。漏掉的表现是"程序能启动、托盘能切引擎，一识别就报模型找不到"。
+
+**自检自己也会写错**：`REQUIRED_DATA` 里的名字必须写成**归一化后的点分形式**（`rapidocr_onnxruntime.models.xxx.onnx`），因为 `_read_bundled_entries` 会把 CArchive 里的路径分隔符换成点。第一版这里写的是带斜杠的路径，于是模型明明打进去了却报"缺失" —— **写完自检要拿真实产物对一遍**。
 
 读包内容时注意：**纯 Python 模块在 PYZ 里，而入口脚本 `main` 和所有原生扩展（`.pyd`/`.dll`）在顶层条目里，不在 PYZ**（例如 `win32\win32clipboard.pyd` 是以 `win32clipboard` 这个名字被 import 的）。只看 PYZ 会误报 `main` 和 `win32clipboard` 缺失。
+
+### 体积
+
+打包两个引擎后 EXE 是 **117.4 MB**（只打 Tesseract 时是 36.2 MB）。构成：onnxruntime `capi` 约 37.6MB、numpy 约 15MB、三个 ONNX 模型约 15.4MB，其余是原有的 36MB。这是「中文识别准确率」的代价，**不是配置问题，压不下去** —— onnxruntime 的 DLL 和模型都是必需项。
 
 ## 依赖
 
 以 `requirements.txt` 为准：
 
 ```
-pynput>=1.7.6        # 全局热键支持
-pystray>=0.19.5      # 系统托盘图标支持
-pytesseract>=0.3.10  # Tesseract OCR Python 封装
-Pillow>=10.0.0       # 图像处理库 (PIL)
-pywin32>=306         # Windows API 访问 (剪贴板)
-translators>=5.8.0   # 多引擎翻译支持
-pytest>=7.0.0        # 单元测试框架
+pynput>=1.7.6                  # 全局热键支持
+pystray>=0.19.5                # 系统托盘图标支持
+pytesseract>=0.3.10            # Tesseract OCR Python 封装（需另装 Tesseract-OCR 5.x）
+rapidocr-onnxruntime>=1.3.0    # RapidOCR（PaddleOCR 模型 + ONNX Runtime，随程序打包）
+Pillow>=10.0.0                 # 图像处理库 (PIL)
+pywin32>=306                   # Windows API 访问 (剪贴板)
+translators>=5.8.0             # 多引擎翻译支持
+pytest>=7.0.0                  # 单元测试框架
 ```
 
 ## 测试与验证
 
 ```bash
-pytest test_app.py test_integration.py test_pin_logic.py   # 58 个用例
+pytest test_app.py test_integration.py test_pin_logic.py   # 73 个用例
 python verify_app.py                                       # 环境自检，失败返回非零退出码
 ```
 
@@ -183,7 +213,7 @@ python verify_app.py                                       # 环境自检，失�
 - **`translators` 导入前必须钉住地区**：`import translators` **在导入期就会发网络请求** —— 它的模块体里直接写了 `tss = TranslatorsServer()`（`server.py:6205`），构造函数调用 `get_region_of_server()`（`server.py:5896`），后者请求 `geolocation.onetrust.com`、失败再退到 `httpbin.org`（`server.py:364`）。两个后果都很糟：① 探测失败抛 `TranslatorError`，**整个 import 直接失败** —— 用户点「翻译」看到的是一个跟 httpbin.org 有关的报错（实测 25 次独立进程里挂 2 次，`verify_app.py` 也因此随机失败）；② 那两次 `requests.get` **没设 timeout**，网络不通时可能挂很久。`server.py:344` 留了逃生口：`translators_default_region` 有值就在第一行直接返回、不发请求。所以 `translator._translators()` 在 `import translators` **之前**先 `os.environ.setdefault("translators_default_region", "CN")`（`_DEFAULT_REGION`）—— **顺序错了就等于没修**。用 `setdefault` 是为了不覆盖用户自己设的值，非中国大陆用户可设 `EN` 覆盖。回归防护：`test_app.py::test_translator_pins_the_region_before_importing_translators`（检查顺序）、`test_translator_does_not_override_a_user_chosen_region`、`test_translator_loads_without_any_network`（把 `socket.socket` 换成连接必抛异常的类，**断网也必须能加载**）。
 - **`verify_app.py` 的依赖检查不能直接 `import translators`**：理由同上，那样会依赖网络、随机失败。它走应用自己的 `translator._translators()`，既稳定，测的又是应用真正使用的那条路径。
 - **延迟导入的内存收益有前提：本次运行没点过翻译**。Python 无法可靠卸载已导入的模块 —— 用户第一次点「中文/英文」后，那 48MB 会一直留到程序重启（实测 50MB → 100MB）。**不要试图用 `del sys.modules["translators"]` 去"回收"**：它不会把内存还给操作系统，强行重新导入还有崩溃风险。真要"用完就降回来"，只能把翻译做成用完即退的独立子进程，复杂度明显上升，目前不做。
-- **内存基线**（空转、无翻译，用于回归对比）：打包后 EXE **约 50~60MB 工作集 / 约 50MB 私有 / 10 个线程 / 空闲 CPU 0.000%**。逐阶段构成：空解释器 14.5M、tkinter +3.6M、Pillow +4.4M、pystray +1.7M、pynput +0.4M、pywin32 +1.4M、pytesseract +0.2M、**本项目全部模块 +0.3M**。也就是说内存几乎全由第三方库决定，**优化要往"少加载/晚加载第三方包"方向做，改自己的代码没有意义**。注意 `tesseract.exe` 是每次识别 spawn 的子进程、用完即退，它的内存从不计入本进程。
+- **内存基线**（空转、无翻译、未用过 RapidOCR，用于回归对比）：打包后 EXE **约 58MB 工作集 / 约 34MB 私有 / 12 个线程 / 空闲 CPU 0.000%**。逐阶段构成：空解释器 14.5M、tkinter +3.6M、Pillow +4.4M、pystray +1.7M、pynput +0.4M、pywin32 +1.4M、pytesseract +0.2M、**本项目全部模块 +0.3M**。也就是说内存几乎全由第三方库决定，**优化要往"少加载/晚加载第三方包"方向做，改自己的代码没有意义**。注意 `tesseract.exe` 是每次识别 spawn 的子进程、用完即退，它的内存从不计入本进程。历史值：只打 Tesseract 时 50.4MB / 9 线程 —— 现在这 +8MB / +3 线程就是 pytesseract 那句 `from numpy import ndarray` 的代价（见下）。
 - **UI 主题与自绘控件**：`ui_theme.py` 是唯一的颜色/字体/间距来源，`ui_widgets.py` 放 Tk 原生做不到的件（圆角卡片、细滚动条、扁平按钮、分段选择器）。改界面前先读这两个文件的模块注释。
 - **字体必须含中日韩字形**：`FONT_FAMILY` 是 `Microsoft YaHei UI`（同时含拉丁与中日韩字形）。**不要改回 `Segoe UI`** —— 它没有中文字形，Tk 只能逐字回退，中英文混排时字重/字距/基线全都不一致（实测症状：中文明显比英文粗）。注意 `Microsoft YaHei`（不带 ` UI`）这个名字在系统里**并不存在**，Tk 对不存在的字体名不报错、只静默回退，所以 `test_app.py::test_ui_font_family_is_actually_installed` 会拦住它。
 - **字号用「点」（正数），间距用 `px()`（逻辑像素）**：本程序是 DPI 感知的，Tk 会把点按 `tk scaling` 换算成物理像素（实测本机 150% 缩放，`tk scaling = 2.0`）。而 `padx`/`pady`/`width`/`height` 的单位是**物理像素**，直接写 12 在 150% 屏上只有 8 个逻辑像素、观感偏挤 —— 所以间距一律过 `ui_theme.px()`。窗口尺寸同理按 DPI 缩放（见 `ocr_window._compute_window_size`）。
@@ -212,3 +242,10 @@ python verify_app.py                                       # 环境自检，失�
   - **Tesseract 的天花板就在这里**：96.9% 仍是"有肉眼可见错误"的水平（实测 `0 FAIL` → `/0 FAILL`、`渲染` → `泻染`、`自检` → `目检`）。这是标准 `chi_sim` 模型在这类内容上的上限，**不是配置没调好** —— 继续调参不会再有明显收益。要再上一个台阶只能换引擎（PaddleOCR / RapidOCR 一类），代价是 EXE 体积明显变大。
   - 回归防护：`test_app.py::test_ocr_preprocess_binarizes_instead_of_boosting_contrast`（断言输出只含 0/255，防止有人把"对比度增强"加回来）与 `test_ocr_otsu_picks_a_threshold_between_the_two_peaks`。
 - **pandas 体积陷阱**：`pytesseract` 会 `try: import pandas`（仅服务于 `Output.DATAFRAME`，本项目用不到）。一旦运行环境装了 pandas，就会连带载入 numpy + OpenBLAS，实测多占 **约 63MB 工作集 / 528MB 私有内存 / 23 个线程**。`build_exe.py` 里的 `--exclude-module=pandas` 是安全的（pytesseract 的导入有 try/except 保护），不要移除；开发环境同样建议使用不含 pandas 的 venv。
+- **numpy 现在**是**必须装的**（onnxruntime 的硬依赖），于是上面那个坑以镜像形式又踩了一次：`pytesseract.py:35` 有一句 `from numpy import ndarray`（同样包在 `try/except ModuleNotFoundError` 里）。numpy 没装时它静默失败、零代价；numpy 一装，**每次启动都真的加载 numpy 并拉起 OpenBLAS 线程池**。实测空闲进程：
+  - 修之前：工作集 **86.1MB**、私有 **516.6MB**、线程 **27**
+  - 修之后：工作集 **58.4MB**、私有 **34.1MB**、线程 **12**
+  - （改造前、只有 Tesseract 的基线：50.4MB / 9 线程 —— 所以打包 RapidOCR 的净代价只有 +8MB / +3 线程）
+  
+  修法是在 `ocr_engine.py` 里**于 `import pytesseract` 之前**把这些环境变量 `setdefault` 成 `"1"`：`OPENBLAS_NUM_THREADS` / `OMP_NUM_THREADS` / `MKL_NUM_THREADS` / `NUMEXPR_NUM_THREADS`。**顺序错了就等于没修**（环境变量只在模块首次加载时生效）。实测限制成单线程**不会拖慢识别**（推理是 onnxruntime 自己的线程池在做，numpy 只是数据容器）：RapidOCR 单张图 1.24s → 1.17s。
+- **`is_available()` 绝不能用 `import` 来判断**：`RapidOcrBackend.is_available()` 用 `importlib.util.find_spec`。原因是**托盘菜单在构建菜单时就会问一次可用性**（要标注「未安装」），只要那里写了 `import`，"懒加载"就被彻底绕过 —— 实测：只是启动程序、什么都没做，工作集就从 50MB 涨到 86MB。回归防护：`test_app.py::test_rapidocr_availability_check_does_not_import_the_module`（用 monkeypatch 断言 `_module()` 没被调用）与 `test_ocr_engine_does_not_import_rapidocr_at_module_level`（开子进程验证，同进程内断言会失真）。

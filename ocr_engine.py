@@ -1,9 +1,32 @@
+import importlib.util
 import os
+import statistics
 import subprocess
 
-import pytesseract
-from PIL import Image
-from config import config_manager
+# ---------------------------------------------------------------------------
+# 压掉 numpy 带进来的 OpenBLAS 线程池
+#
+# **必须在 import numpy 之前设置**（环境变量只在新加载时生效）。
+#
+# 为什么需要：``pytesseract`` 在导入期有一句 ``from numpy import ndarray``
+# （包在 ``try/except ModuleNotFoundError`` 里，``pytesseract.py:35``）。
+# 以前 numpy 没装，这句静默失败、没有任何代价；**现在 numpy 是 onnxruntime 的
+# 硬依赖、必然装着**，于是每次启动都会真的加载 numpy，并拉起 OpenBLAS 的线程池。
+# 实测空闲进程：线程 **9 → 27**、私有内存 516MB、工作集 +9MB。
+#
+# 这和 CLAUDE.md 里记的 pandas 陷阱是同一个坑的镜像版（pytesseract 会
+# ``try: import pandas``，pandas 一装就连带 numpy + OpenBLAS）。
+#
+# 限制成单线程**不会拖慢识别**：推理是 onnxruntime 自己的线程池在做，numpy 只是
+# 数据容器。实测 RapidOCR 单张图 1.24s → 1.17s（略快，没有变慢）。
+# ---------------------------------------------------------------------------
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS",
+             "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
+import pytesseract  # noqa: E402  （必须在上面那几个环境变量之后）
+from PIL import Image  # noqa: E402
+from config import config_manager  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -258,9 +281,215 @@ class TesseractBackend(OcrBackend):
     def name(self) -> str:
         return "tesseract"
 
-def create_ocr_engine(backend_name="tesseract"):
-    """OCR 引擎工厂函数"""
-    if backend_name == "tesseract":
-        return TesseractBackend()
-    # 未来可扩展其他后端 (如 paddleocr, baidu_api 等)
-    return TesseractBackend()
+class RapidOcrBackend(OcrBackend):
+    """RapidOCR 后端（PaddleOCR 的中文模型 + ONNX Runtime）。
+
+    为什么要有它：Tesseract 的标准 ``chi_sim`` 模型在中文上有**模型层面的上限**，
+    调参救不回来。同一张用户真实截图（小字 + 中英数字混排 + 花哨背景）：
+
+        Tesseract 最佳配置   真实**泻**染截图确认      **目**检通过      13 PASS **/0 FAILL**
+        RapidOCR            真实**渲**染截图确认      **自**检通过      13 PASS **/ 0 FAIL**
+
+    相似度都是 96.9%，但 Tesseract 错的是**汉字**（文本直接不可用），RapidOCR 错的
+    只是空格（内容可恢复）—— 对用户来说这是质的区别。
+
+    代价：EXE 体积从 36MB 涨到约 80MB，单次识别约 0.5s → 1.8s。
+
+    **必须懒加载。** onnxruntime + 三个模型会给进程加几十 MB 工作集，而只用
+    Tesseract 的用户根本用不到 —— 和 ``translator`` 的 ``translators`` 同理。
+    因此 ``import rapidocr_onnxruntime`` 只出现在 ``_module()`` / ``_get_engine()`` 里，
+    **绝不允许**写到模块顶层。
+
+    **不要对它做 Tesseract 那套预处理。** 实测把图先 2x 放大再喂给 RapidOCR，
+    相似度从 96.9% 掉到 **77.1%**（它内部有自己的尺寸归一化，外部放大反而干扰）。
+    二值化同理。所以 ``recognize`` 直接喂原图。
+    """
+
+    #: 空格重建阈值：相邻字符框间隙超过「中位字宽 × 该比例」就判定为空格。
+    #: 0.35 会把 ``passed`` 拆成 ``p assed``，0.6 会把 ``60 passed`` 粘成 ``60passed``，
+    #: 实测 0.45 最稳。
+    GAP_RATIO = 0.45
+    #: 间隙的绝对下限（像素）。只靠比例会在小字号图上误判。
+    MIN_GAP_PX = 2
+
+    def __init__(self):
+        self._engine = None
+
+    @staticmethod
+    def _module():
+        import rapidocr_onnxruntime
+
+        return rapidocr_onnxruntime
+
+    def is_available(self) -> bool:
+        """检查 RapidOCR **在不在**，但**不真的导入它**。
+
+        **绝不能用 ``import`` 来检查可用性。** ``import rapidocr_onnxruntime`` 会
+        连带加载 onnxruntime + numpy，实测给一个空闲进程加约 **36MB 工作集和 18 个
+        线程**（OpenBLAS 的线程池）。而托盘菜单在**构建菜单时**就会问一次可用性
+        （``TrayApp._engine_text`` 要标注「未安装」），于是"懒加载"被彻底绕过 ——
+        实测：只是启动程序、什么都没做，工作集就从 **50MB 涨到 86MB**、线程 9 → 27。
+
+        ``find_spec`` 只问模块定位器，不执行模块代码，所以没有这个代价。
+        """
+        try:
+            return importlib.util.find_spec("rapidocr_onnxruntime") is not None
+        except (ImportError, ValueError):
+            # 父包不存在时 find_spec 会抛 ModuleNotFoundError；名字非法时抛 ValueError
+            return False
+
+    def _get_engine(self):
+        """首次识别时才构造引擎（构造会加载三个 ONNX 模型，实测约 0.6s）。"""
+        if self._engine is None:
+            self._engine = self._module().RapidOCR()
+        return self._engine
+
+    # ------------------------------------------------------------ 空格重建
+
+    @staticmethod
+    def _is_cjk(ch: str) -> bool:
+        return any(lo <= ord(ch) <= hi for lo, hi in (
+            (0x3000, 0x303F),   # 中日韩标点
+            (0x4E00, 0x9FFF),   # 中日韩统一表意文字
+            (0xFF00, 0xFFEF),   # 全角字符
+        ))
+
+    @classmethod
+    def rebuild_spaces(cls, item) -> str:
+        """按字符框的横向间隙把空格补回来。
+
+        RapidOCR 的识别模型经常吞掉空格（``pytest60passed``、``EXE36.16MB``），
+        但调用时传 ``return_word_box=True`` 会额外返回**每个字符**的框与置信度
+        （item 变成 6 元组：``[框, 文本, 置信度, 字符框列表, 字符列表, 逐字置信度]``）。
+        同一个词内部的字符是紧挨着的（间隙 0~1px），词与词之间才留出明显间隙。
+
+        **必须限定只在"非中日韩"字符之间插。** 汉字本身字距就宽，无脑插会得到
+        ``真 实 渲 染 截 图 确 认`` 这种废文本（实测过，中文会被整个拆散）。
+
+        拿不到词框时（长度不足或与文本长度对不上）原样返回文本，绝不猜。
+        """
+        if len(item) < 5 or not item[3] or not item[4]:
+            return item[1]
+
+        boxes, chars = item[3], item[4]
+        if len(boxes) != len(chars):
+            return item[1]
+
+        widths = [max(p[0] for p in b) - min(p[0] for p in b) for b in boxes]
+        median_w = statistics.median(widths) if widths else 0
+        if median_w <= 0:
+            return item[1]
+
+        out = []
+        for i, ch in enumerate(chars):
+            if i and not cls._is_cjk(chars[i - 1]) and not cls._is_cjk(ch):
+                gap = min(p[0] for p in boxes[i]) - max(p[0] for p in boxes[i - 1])
+                if (gap > median_w * cls.GAP_RATIO and gap >= cls.MIN_GAP_PX
+                        and not out[-1].endswith(" ")
+                        and not cls._is_unit_split(out, ch)):
+                    out.append(" ")
+            out.append(ch)
+        return "".join(out)
+
+    @staticmethod
+    def _is_unit_split(out, ch: str) -> bool:
+        """判断「在这里插空格」是不是把单位拆开了（``MB`` 被拆成 ``M B``）。
+
+        实测数据：真实空格的间隙是 5~13px，而 ``MB`` 里 M 与 B 之间的 kerning
+        间隙也是 5~6px —— **数值上完全重叠，靠调阈值分不开**（0.45 能保住
+        ``60 passed`` 但拆散 ``MB``，0.6 反过来）。
+
+        所以加一条有界的规则：**上一个词正好是单个大写字母、且当前字符也是大写
+        字母时不插**。只针对大写，避免误伤 ``a boy`` 这类正常的单字母词。
+        """
+        if not ("A" <= ch <= "Z"):
+            return False
+        token = out[-1].split(" ")[-1] if out else ""
+        return len(token) == 1 and "A" <= token <= "Z"
+
+    @staticmethod
+    def _classify_error(exc) -> str:
+        name = type(exc).__name__.lower()
+        text = str(exc).lower()
+        if isinstance(exc, ImportError) or "no module named" in text:
+            return "not_found"
+        if "onnxruntime" in text and ("not found" in text or "failed" in text):
+            return "not_found"
+        return "other"
+
+    def recognize(self, image: Image.Image) -> str:
+        """识别图片中的文字
+
+        :raises OcrError: 识别过程失败（引擎缺失、模型加载失败等）
+        """
+        try:
+            import numpy as np
+
+            engine = self._get_engine()
+            result, _ = engine(np.array(image.convert("RGB")),
+                               return_word_box=True)
+        except Exception as e:
+            raise OcrError(
+                f"RapidOCR 识别出错: {e}", kind=self._classify_error(e)
+            ) from e
+
+        if not result:
+            return ""
+        return "\n".join(self.rebuild_spaces(item) for item in result).strip()
+
+    @property
+    def name(self) -> str:
+        return "rapidocr"
+
+
+#: 后端名 -> 实现类。``config_manager`` 里的 ``ocr_backend`` 就是这里的键。
+_BACKENDS = {
+    "tesseract": TesseractBackend,
+    "rapidocr": RapidOcrBackend,
+}
+
+#: 默认后端。中文正确率优先 —— 见 RapidOcrBackend 的类注释。
+DEFAULT_BACKEND = "rapidocr"
+
+#: 引擎不可用时的兜底顺序。用户选的那个起不来就依次往下试。
+FALLBACK_ORDER = ("rapidocr", "tesseract")
+
+#: 后端名 -> 界面展示名
+BACKEND_LABELS = {
+    "tesseract": "Tesseract",
+    "rapidocr": "RapidOCR",
+}
+
+
+def backend_label(name) -> str:
+    """后端名的界面展示形式（未知名字原样返回，便于排查配置写错）。"""
+    if not name:
+        return "未知引擎"
+    return BACKEND_LABELS.get(name, str(name))
+
+
+def available_backends():
+    """返回当前环境里真正可用的后端名列表（按 FALLBACK_ORDER 排序）。"""
+    names = []
+    for name in FALLBACK_ORDER:
+        cls = _BACKENDS.get(name)
+        if cls is None:
+            continue
+        try:
+            if cls().is_available():
+                names.append(name)
+        except Exception:
+            continue
+    return names
+
+
+def create_ocr_engine(backend_name=None):
+    """OCR 引擎工厂。
+
+    :param backend_name: 后端名；为 None 时读配置里的 ``ocr_backend``。
+        未知名字**回落到默认后端**而不是抛异常 —— 配置文件被手工改坏不该让
+        整个识字功能不可用。
+    """
+    if backend_name is None:
+        backend_name = config_manager.get("ocr_backend") or DEFAULT_BACKEND
+    return _BACKENDS.get(backend_name, _BACKENDS[DEFAULT_BACKEND])()
