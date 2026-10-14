@@ -173,7 +173,7 @@ python verify_app.py                                       # 环境自检，失�
 
 - **DPI 感知**：`main.py` 在 `if __name__ == "__main__":` 里（即**所有 import 之后**、任何窗口创建之前）调用 `ctypes.windll.shcore.SetProcessDpiAwareness(1)`，确保选区坐标与物理像素匹配。真实约束是"早于任何窗口创建"，不是"早于 import"。`SetProcessDpiAwareness` 全进程只生效一次，**不要**在别处再调 —— 那时 Tk 已在运行，只会拿到 `E_ACCESSDENIED` 并被 except 吞掉，属于"看起来有用其实无效"的代码。
 - **多 Tk 解释器**：曾观察到同进程内并存多个 Tk 解释器时抛 `TclError: Can't find a usable init.tcl`，**但未能稳定复现**（后续连开 6 个 `tk.Tk()` 全部正常）。不管触发条件是什么，测试里都**不要**为了验证「两个 root 并存」而真的建多个解释器 —— 用带 `_root()` 方法的假控件直接测 `IconProvider._sync`（见 `test_integration.py::test_icon_cache_is_keyed_on_the_calling_widget_root`）。这是防御性选择，与上面那条观察是否复现无关。
-- **Tesseract 预处理**：`ocr_engine.TesseractBackend._preprocess` 对小图自动放大，转灰度 + 对比度拉伸 + 锐化以提高识别率。该方法与识别引擎解耦，可在未安装 Tesseract 时单独测试。
+- **Tesseract 预处理**：`ocr_engine.TesseractBackend._preprocess` = 灰度 → 小图 2x BICUBIC 放大 → **Otsu 二值化**。该方法与识别引擎解耦，可在未安装 Tesseract 时单独测试。**不要加对比度增强，也不要加锐化** —— 详见下方「OCR 识别率排查记录」。
 - **translators 超时**：`translator.py` 设 `timeout=15` 防止网络卡死。
 - **PyInstaller hidden imports**：`pytesseract`、`translators`、`PIL.ImageTk` 等库动态导入，需要显式 `--hidden-import`。
 - **热键兼容性**：使用 pynput 库实现全局热键，兼容无管理员权限的受限环境。
@@ -199,5 +199,16 @@ python verify_app.py                                       # 环境自检，失�
 - **`tk.Scrollbar` 一定带上下箭头**，`ttk.Scrollbar` 在 Windows 上受原生主题限制、做不出细圆角滑块 —— 所以滚动条用 `ui_widgets.ThinScrollbar` 自绘。`tk.Button` 即使 `relief="flat"` 在 Windows 上**仍会画立体边框**，必须同时 `bd=0` + `highlightthickness=0`（见 `ui_widgets.flat_button`）。
 - **UI 改动必须两种主题都验证**：`%APPDATA%` 里的配置决定明暗，只测一种会漏掉写死的色值。`_ui_shot.py` 这类临时探针的写法：`config_manager.is_dark_mode = lambda: False` 强制浅色，再用 `ImageGrab` 抓窗口（**探针自己也要先 `SetProcessDPIAware()`，否则 Tk 的逻辑坐标与 ImageGrab 的物理像素对不上，会抓到别的窗口**；无边框浮窗还要 `-topmost`，否则会被别的窗口盖住）。
 - **选区图必须从冻结的全屏截图里裁，不能重新抓屏**：`ScreenshotOverlay.__init__` 已经拍了一张干净的全屏图（`self.full_screenshot`），选区图就该从它裁（`self.full_screenshot.crop(...)`）。**绝不允许**在 `_on_button_release` 里再调一次 `ImageGrab.grab(bbox=...)` —— 那时覆盖层窗口还显示着，而选区边框（3px 白框 + 1px 虚线强调框）就画在选区边缘上，重新抓屏会把边框一起抓进识别输入。实测（真实渲染的中英文，紧贴文字裁剪）：不带边框 **90%** 准确率，带边框直接崩到 **4.3%**。用户贴着文字选是最自然的选法，所以触发率极高；而选区留白 6px 以上时边框落在空白处、实测无影响 —— 这个 bug 只在"选得紧"时发作，从偶发现象极难反推。用冻结图还有两个附带好处：不受"抓图期间屏幕变化"影响，且省掉一次全屏抓取。回归防护：`test_integration.py::test_overlay_crops_the_frozen_screenshot_instead_of_regrabbing`（判定方式是抓屏函数的调用次数）。
-- **OCR 识别率排查记录（别再走弯路）**：曾怀疑「暗色模式（浅字深底）会降低识别率」，**实测证伪** —— 现状管线在暗底浅字上是 100%，而**自动反色反而更差**（Tesseract 5 自己能处理反色，不要去 invert）。也测过 PSM 3/4/6、对比度 2.0、2x/3x 放大、autocontrast、Otsu 二值化：在干净样本上**全部无差别**（99%+），所以别在预处理上瞎调。**教训：PIL 合成的样本太干净，区分不出任何管线差异** —— 必须让 Windows 真的把文字画到屏幕上（ClearType 亚像素渲染）再截图，才是有意义的测量。真正的识别率杀手是上面那条「选区边框被拍进输入」。
+- **OCR 识别率排查记录（别再走弯路）**：两个真正的杀手，都已修复，**别再往别处找**：
+  1. **选区边框被拍进识别输入**（见上一条）—— 贴着文字选时 90% → 4.3%。
+  2. **预处理里的「对比度增强 + 锐化」**—— 用户真实截图上只有 **85.4%**，换成 **Otsu 二值化**后 **96.9%**。见下。
+- **预处理：合成样本会骗你，必须用真实截图做基准**。这条是花了两次排查才学到的：
+  - 第一轮我用 PIL 合成样本测，结论是"对比度 2.0 / 2x/3x 放大 / autocontrast / Otsu **全部无差别**（99%+），别在预处理上瞎调"。**这个结论是错的** —— 它只在干净样本上成立。合成样本没有亚像素渲染、没有背景干扰，任何管线都能认对。
+  - 换成**用户的真实截图**（小字 + 中英数字混排 + 背后有花哨插画）后，差异立刻显出来：对比度增强+锐化 **85.4%**、不处理 92.7%、autocontrast 90.6%、**Otsu 96.9%**。
+  - **"增强对比度"这个直觉是错的**：它把细笔画糊掉，反而让 Tesseract 自己的二值化更难做。而旧实现恰好是所有候选里最差的一个。
+  - 放大倍数与重采样要**配合 Otsu 一起扫**（难图 / 好认-浅底）：`1x 81.2%/100%`、`2x 96.9%/100%`、`3x 96.9%/98.6%`、`4x 95.8%/98.6%`。3x 起会把"好认的图"从 100% 拉到 98.6%，2x 不会 —— 所以取 **2x BICUBIC**。
+  - 无差别（别再测了）：`--oem 1` vs 3、`chi_sim+eng` vs `eng+chi_sim`、`preserve_interword_spaces`、加白边、PSM 3/4/6。局部自适应阈值（BoxBlur 背景 + 阈值）实测 **88%**，明显不如全局 Otsu。`eng` 单语言只有 62.5%（中文全丢），**不要**为了让拉丁字符更准而去掉 `chi_sim`。
+  - 反色（invert）**更差**：Tesseract 5 自己能处理浅字深底，不要去 invert（暗底浅字实测 100%）。
+  - **Tesseract 的天花板就在这里**：96.9% 仍是"有肉眼可见错误"的水平（实测 `0 FAIL` → `/0 FAILL`、`渲染` → `泻染`、`自检` → `目检`）。这是标准 `chi_sim` 模型在这类内容上的上限，**不是配置没调好** —— 继续调参不会再有明显收益。要再上一个台阶只能换引擎（PaddleOCR / RapidOCR 一类），代价是 EXE 体积明显变大。
+  - 回归防护：`test_app.py::test_ocr_preprocess_binarizes_instead_of_boosting_contrast`（断言输出只含 0/255，防止有人把"对比度增强"加回来）与 `test_ocr_otsu_picks_a_threshold_between_the_two_peaks`。
 - **pandas 体积陷阱**：`pytesseract` 会 `try: import pandas`（仅服务于 `Output.DATAFRAME`，本项目用不到）。一旦运行环境装了 pandas，就会连带载入 numpy + OpenBLAS，实测多占 **约 63MB 工作集 / 528MB 私有内存 / 23 个线程**。`build_exe.py` 里的 `--exclude-module=pandas` 是安全的（pytesseract 的导入有 try/except 保护），不要移除；开发环境同样建议使用不含 pandas 的 venv。

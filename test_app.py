@@ -131,6 +131,46 @@ def test_ocr_preprocess_leaves_large_image_unscaled():
     assert out.size == (1200, 1200)
 
 
+def test_ocr_preprocess_binarizes_instead_of_boosting_contrast():
+    """回归防护：预处理必须是 Otsu 二值化，不能退回「对比度增强 + 锐化」。
+
+    旧实现（灰度 → 2x → 对比度 2.0 → SHARPEN）在用户的真实截图上实测只有
+    **85.4%**，而 Otsu 二值化是 **96.9%** —— 差 11.5 个百分点。"增强对比度"
+    这个直觉是错的：它把细笔画糊掉，反而让 Tesseract 自己的二值化更难做。
+
+    关键在于**这个差异在干净的合成样本上看不出来**（两者都是 98%+），
+    必须用真实截图才测得出 —— 所以必须有这条防护钉住，否则很容易被"优化"回去。
+    """
+    from ocr_engine import TesseractBackend
+
+    # 造一张带灰阶渐变的图：二值化后应当只剩 0 与 255
+    src = Image.new('L', (60, 60))
+    src.putdata([(x * 7) % 256 for x in range(60 * 60)])
+    out = TesseractBackend._preprocess(src)
+
+    values = {c for _, c in out.getcolors(maxcolors=256)}
+    assert values <= {0, 255}, (
+        f"预处理输出不是二值图（出现了 {sorted(values)[:8]}）—— "
+        "说明又退回了「对比度增强 + 锐化」那套"
+    )
+
+
+def test_ocr_otsu_picks_a_threshold_between_the_two_peaks():
+    """Otsu 的阈值应当落在前景/背景两个峰之间，而不是退化成固定阈值。"""
+    from ocr_engine import TesseractBackend
+
+    # 明显的双峰：背景 220、前景 40
+    src = Image.new('L', (100, 100), color=220)
+    for x in range(20, 80):
+        for y in range(20, 80):
+            src.putpixel((x, y), 40)
+
+    out = TesseractBackend._otsu(src)
+    assert out.getpixel((5, 5)) == 255       # 背景变白
+    assert out.getpixel((50, 50)) == 0       # 前景变黑
+    assert {c for _, c in out.getcolors(maxcolors=256)} <= {0, 255}
+
+
 def test_ocr_failure_raises_instead_of_faking_result(monkeypatch):
     """识别失败必须抛 OcrError。
 
@@ -798,16 +838,19 @@ def test_isolated_config_redirects_the_translator_singleton(isolated_config):
 
 # ---------- 图标缓存 ----------
 
-def test_icon_cache_invalidates_when_the_root_is_destroyed():
-    """回归防护：``_sync`` 必须识别出「解释器已被销毁」。
+def test_icon_cache_is_cleared_when_the_root_dies():
+    """回归防护：发现解释器已销毁时，必须当场抛错并清空缓存。
 
-    ``Misc._root()`` 只是纯 Python 的属性遍历 —— 一个已经被 ``destroy()`` 的 root
-    仍然等于它自己。只比对身份的话会命中旧缓存，返回上一轮那个已被 Tcl 删除的
-    ``PhotoImage``，等到把它配到某个活控件时才炸成
-    ``TclError: image "pyimageN" doesn't exist`` —— 报错位置离真正的原因很远，
-    正是 ``IconProvider`` 的 docstring 声称要防的错误。
+    **这条用假控件，不建真的第二个 Tk 解释器。** 同进程并存多个 Tk 解释器在这台
+    机器上偶发 ``TclError: Can't find a usable init.tcl``（本项目文档里记过，
+    但一直没能稳定复现）—— 会让测试随机挂掉。``_sync`` 只关心"拿到 root、问它
+    活着没"，用带 ``_root()`` 的假控件就能完整覆盖这条代码路径。
+    真解释器的行为另有一条测试（``..._root_is_destroyed``）。
 
-    修复后的行为：当场抛一个说得清的 ``RuntimeError``，并把缓存清干净。
+    为什么必须清缓存：``Misc._root()`` 只是纯 Python 属性遍历，一个已经
+    ``destroy()`` 的 root 仍然等于它自己。只比对身份会命中旧缓存，把上一轮那个
+    已被 Tcl 删除的 ``PhotoImage`` 交出去，等到配到活控件时才炸成
+    ``TclError: image "pyimageN" doesn't exist`` —— 报错位置离真正原因很远。
     """
     import tkinter as tk
 
@@ -815,10 +858,51 @@ def test_icon_cache_invalidates_when_the_root_is_destroyed():
 
     from ui_icons import IconProvider
 
+    class _DeadRoot:
+        def winfo_exists(self):
+            raise tk.TclError(
+                'can\'t invoke "winfo" command: application has been destroyed')
+
+    class _FakeWidget:
+        def __init__(self, root):
+            self._root_obj = root
+
+        def _root(self):
+            return self._root_obj
+
+    dead = _DeadRoot()
     provider = IconProvider()
-    victim = tk.Tk()
+    provider._cache_root = dead
+    provider._cache[("pin", "#FFFFFF")] = "stale-handle"
+
+    with _pytest.raises(RuntimeError, match="已被销毁"):
+        provider._sync(_FakeWidget(dead))
+
+    assert provider._cache_root is None, "发现解释器已死时必须清掉缓存归属"
+    assert not provider._cache, "死句柄不得留在缓存里"
+
+
+def test_icon_cache_invalidates_when_the_root_is_destroyed():
+    """真解释器被销毁后，``winfo_exists()`` 确实会抛 ``TclError``。
+
+    这条验证的是**我们对 Tk 行为的假设**（而不是我们自己的代码），所以单独放一条。
+    创建第二个 Tk 解释器本身有风险（见上一条的说明），因此起不来时明确 skip
+    而不是让整个测试套件随机变红 —— 那属于环境问题，不是被测代码的问题。
+    """
+    import tkinter as tk
+
+    import pytest as _pytest
+
+    from ui_icons import IconProvider
+
+    try:
+        victim = tk.Tk()
+    except tk.TclError as e:
+        _pytest.skip(f"无法创建第二个 Tk 解释器（环境限制）: {e}")
+
     victim.withdraw()
     try:
+        provider = IconProvider()
         provider.get_pin("#FFFFFF", master=victim)
         assert provider._cache_root is victim
         assert provider._cache, "第一次调用应该填充了缓存"

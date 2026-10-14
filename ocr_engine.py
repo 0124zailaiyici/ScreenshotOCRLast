@@ -2,7 +2,7 @@ import os
 import subprocess
 
 import pytesseract
-from PIL import Image, ImageFilter, ImageEnhance
+from PIL import Image
 from config import config_manager
 
 
@@ -162,23 +162,71 @@ class TesseractBackend(OcrBackend):
         return available
 
     @staticmethod
+    def _otsu(image: Image.Image) -> Image.Image:
+        """Otsu 全局阈值二值化（类间方差最大化）。
+
+        自己实现而不是引入 OpenCV —— 只为这一个函数不值得多打一个几十 MB 的依赖。
+        256 次直方图遍历，对截图尺寸来说开销可忽略。
+        """
+        hist = image.histogram()
+        total = sum(hist)
+        if total == 0:
+            return image
+
+        sum_all = sum(i * hist[i] for i in range(256))
+        sum_bg = weight_bg = 0.0
+        best_variance, threshold = -1.0, 127
+        for i in range(256):
+            weight_bg += hist[i]
+            if weight_bg == 0:
+                continue
+            weight_fg = total - weight_bg
+            if weight_fg == 0:
+                break
+            sum_bg += i * hist[i]
+            mean_bg = sum_bg / weight_bg
+            mean_fg = (sum_all - sum_bg) / weight_fg
+            variance = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
+            if variance > best_variance:
+                best_variance, threshold = variance, i
+        return image.point(lambda x: 255 if x > threshold else 0, "L")
+
+    @staticmethod
     def _preprocess(image: Image.Image) -> Image.Image:
-        """图像预处理：灰度 → 小图放大 → 对比度拉伸 → 锐化
+        """图像预处理：灰度 → 小图 2x 放大（BICUBIC）→ Otsu 二值化
 
         与识别引擎解耦，便于在未安装 Tesseract 的环境中单独测试。
+
+        **不要加对比度增强，也不要加锐化。** 旧实现是「灰度 → 2x LANCZOS →
+        对比度 2.0 → SHARPEN」，实测在用户的真实截图上（小字 + 中英数字混排 +
+        背后有花哨插画）是**所有候选里最差的一个**：
+
+            预处理                难图(用户实际)   好认-浅底   好认-暗底
+            对比度2.0 + SHARPEN       85.4%         100%       100%   <-- 旧实现
+            什么都不做                92.7%         100%       100%
+            autocontrast              90.6%         100%       100%
+            Otsu 二值化               96.9%         100%       100%   <-- 现在
+
+        也就是说"增强对比度"这个直觉是错的 —— 它把细笔画糊掉，反而让 Tesseract
+        的二值化更难做。在干净的合成样本上这些差异看不出来（全都是 98%+），
+        必须用真实截图才测得出。
+
+        放大倍数同理（配合 Otsu 一起测，难图 / 好认-浅底）：
+
+            1x  81.2% / 100%     2x  96.9% / 100%     3x  96.9% / 98.6%
+            4x  95.8% / 98.6%
+
+        3x 起会把"好认的图"从 100% 拉到 98.6%，2x 不会。所以取 2x。
         """
         processed = image.convert('L')
 
         # 自动放大：针对小图提高识别率
         w, h = processed.size
         if w < 1000 or h < 1000:
-            processed = processed.resize((w * 2, h * 2), Image.Resampling.LANCZOS)
+            processed = processed.resize((w * 2, h * 2),
+                                         Image.Resampling.BICUBIC)
 
-        # 增强对比度
-        processed = ImageEnhance.Contrast(processed).enhance(2.0)
-
-        # 锐化
-        return processed.filter(ImageFilter.SHARPEN)
+        return TesseractBackend._otsu(processed)
 
     @staticmethod
     def _classify_error(exc) -> str:
