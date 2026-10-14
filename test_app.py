@@ -5,6 +5,7 @@
 """
 import json
 import os
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -1291,6 +1292,30 @@ def test_uninstaller_script_avoids_nested_quotes_and_uses_cmd_c(tmp_path):
     # 4. 复制到 %TEMP% 再执行，这是"不删自己所在目录"的关键
     assert any(ln.startswith("copy ") and "%TEMP%" in ln for ln in lines), \
         "脚本没有先把自身复制到 %TEMP% —— 批处理删不掉自己所在的目录"
+
+
+def test_installed_version_matches_the_readme_changelog():
+    """``install.py`` 的版本号必须和 README 更新日志里最新那条一致。
+
+    版本号在两个地方各写了一遍：`install.py` 的 `APP_VERSION` 写进注册表，
+    README 的更新日志给人看。**改一处忘一处不会有任何报错** —— 用户在
+    「应用和功能」里看到的版本号就是错的（这次就撞上了：README 写了 v1.4.2，
+    `APP_VERSION` 还停在 1.4.1）。
+    """
+    import install
+
+    readme_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "README.md")
+    readme = open(readme_path, encoding="utf-8").read()
+    # 更新日志是最新在前，所以第一条就是当前版本
+    versions = re.findall(r"^### \[v([\d.]+)\]", readme, re.M)
+
+    assert versions, "README 的更新日志里一条 `### [vX.Y.Z]` 都没有，正则或格式变了"
+    assert install.APP_VERSION == versions[0], (
+        f"install.py 的 APP_VERSION 是 {install.APP_VERSION}，"
+        f"但 README 最新一条更新日志是 v{versions[0]} —— "
+        "装出来的「应用和功能」条目会显示错版本"
+    )
 
 
 # ---------------------------------------------------------------------------
