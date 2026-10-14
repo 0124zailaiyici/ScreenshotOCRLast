@@ -879,3 +879,60 @@ def test_is_alive_reports_a_destroyed_interpreter_as_dead():
 
     assert IconProvider._is_alive(_LiveRoot()) is True
     assert IconProvider._is_alive(_DeadRoot()) is False
+
+
+def test_round_rect_has_four_symmetric_corners(tk_root):
+    """回归防护：圆角矩形必须四角一致，且圆角深度随半径增长。
+
+    踩过的坑：``round_rect`` 原来用 ``create_polygon(..., smooth=True)``。Tk 的
+    ``smooth`` 是 B 样条，曲线**不经过**给定点，圆角量由相邻点间距决定，而不是由传入
+    的 ``r`` 决定。实测（真实渲染后逐像素数左上角挖掉的像素数）：
+
+        请求半径 r=4 / 8 / 12 / 20  ->  35 / 36 / 38 / 47   （几乎不随半径变化）
+        同一图形的右下角            ->   0 /  1 /  3 / 12   （基本是直角）
+
+    也就是说它画的根本不是"半径 r 的圆角"，而且**上面圆、下面方** —— 一个看起来
+    像坏掉的窗口。这个函数被 ``RoundedCard``（OCR 窗口的文本卡片、截图工具栏）共用，
+    所以影响面是整个 UI，不只是某一个窗口。
+
+    **本测试的能力边界（别高估它）**：旧写法的**点集本身是对称的**，不对称是
+    ``smooth=True`` 的样条**渲染**出来的，几何断言看不到。所以这里拦的是"又退回了
+    smooth=True"这个动作，靠两条：① 点数必须远超 12（显式采样圆弧）；② 圆角深度必须
+    随半径增长（旧写法几乎不变）。真正的四角对称性只能靠逐像素渲染验证，
+    证据记录在 ``ui_widgets.round_rect`` 的 docstring 里。
+    """
+    from ui_widgets import round_rect
+
+    import tkinter as tk
+
+    cv = tk.Canvas(tk_root, width=200, height=120)
+    try:
+        item = round_rect(cv, 0, 0, 200, 120, 12, fill="#000")
+        coords = cv.coords(item)
+        pts = list(zip(coords[0::2], coords[1::2]))
+        assert len(pts) > 12, "点数太少，圆角没有被采样出来"
+
+        cx, cy = 100.0, 60.0
+        for x, y in pts:
+            assert any(abs(2 * cx - x - px) < 1e-6 and abs(y - py) < 1e-6
+                       for px, py in pts), \
+                f"({x:.2f},{y:.2f}) 的横向镜像不在图形里 —— 左右角不对称"
+            assert any(abs(x - px) < 1e-6 and abs(2 * cy - y - py) < 1e-6
+                       for px, py in pts), \
+                f"({x:.2f},{y:.2f}) 的纵向镜像不在图形里 —— 上下角不对称"
+
+        # 圆角深度必须随半径增长。用"离左上角最近的那个点的 x+y"当度量：
+        # 半径 r 时该点约在 (r(1-1/√2), r(1-1/√2))，所以 r 越大 x+y 越大。
+        # smooth=True 的旧写法下这两个值几乎一样，会被这条断言拦下。
+        near = []
+        for r in (4, 20):
+            it = round_rect(cv, 0, 0, 200, 120, r, fill="#000")
+            c = cv.coords(it)
+            near.append(min(x + y for x, y in zip(c[0::2], c[1::2])))
+        assert near[1] > near[0] + 8, (
+            f"半径 4 与 20 的圆角深度几乎一样（{near[0]:.2f} vs {near[1]:.2f}）—— "
+            "说明圆角不是按半径画的"
+        )
+    finally:
+        cv.destroy()
+

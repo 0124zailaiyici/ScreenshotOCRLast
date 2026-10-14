@@ -10,6 +10,7 @@ Tk 没有 ``border-radius``，所有圆角都得用 Canvas 画；``tk.Scrollbar`
 - 颜色一律从 ``theme_manager`` 取，不要在这里写死。
 """
 
+import math
 import tkinter as tk
 
 from ui_theme import (
@@ -21,20 +22,44 @@ from ui_theme import (
 )
 
 
-def round_rect(canvas, x1, y1, x2, y2, r, **kwargs):
+def round_rect(canvas, x1, y1, x2, y2, r, steps=8, **kwargs):
     """在 Canvas 上画圆角矩形，返回 item id。
 
-    用 ``smooth=True`` 的多边形逼近圆角 —— 这是 Tk 里最省事、视觉上也可接受的做法
-    （Tk 没有原生的圆角图元）。
+    **不要把这里退回 ``create_polygon(..., smooth=True)`` 的写法。**
+
+    Tk 的 ``smooth=True`` 是 B 样条，曲线**不经过**给定的点，圆角量由相邻点的
+    间距决定，而不是由我们传进来的 ``r`` 决定。实测（真实渲染后逐像素数）：
+
+        请求半径      左上挖掉   右上   左下   右下
+        r= 4            35       18     18      0
+        r= 8            36       19     19      1
+        r=12            38       21     21      3
+        r=20            47       30     30     12
+
+    两个结论：① 圆角深度几乎**不随半径变化**（r 从 4 到 20，左上只从 35 变到 47），
+    所以它根本不是"半径 r 的圆角"；② 四个角**互不一致**，右下角基本是直角 ——
+    视觉上就是一个"上面圆、下面方"的破窗口。
+
+    改成把四个圆角显式采样成圆弧点、``smooth=False``，形状就是精确的：
+    同样实测挖掉量随半径正常增长（r=4/8/12/20 对应 36/45/60/106），四角一致。
+    每个角 ``steps+1`` 个点，8 段在这个尺度下已经看不出棱角。
     """
     r = max(0.0, min(r, (x2 - x1) / 2.0, (y2 - y1) / 2.0))
-    points = [
-        x1 + r, y1, x2 - r, y1, x2, y1,
-        x2, y1 + r, x2, y2 - r, x2, y2,
-        x2 - r, y2, x1 + r, y2, x1, y2,
-        x1, y2 - r, x1, y1 + r, x1, y1,
-    ]
-    return canvas.create_polygon(points, smooth=True, **kwargs)
+    if r <= 0:
+        return canvas.create_polygon(x1, y1, x2, y1, x2, y2, x1, y2, **kwargs)
+
+    def arc(cx, cy, a0, a1):
+        return [(cx + r * math.cos(a0 + (a1 - a0) * i / steps),
+                 cy + r * math.sin(a0 + (a1 - a0) * i / steps))
+                for i in range(steps + 1)]
+
+    points = []
+    points += arc(x1 + r, y1 + r, math.pi, math.pi * 1.5)          # 左上
+    points += arc(x2 - r, y1 + r, math.pi * 1.5, math.pi * 2)      # 右上
+    points += arc(x2 - r, y2 - r, 0.0, math.pi * 0.5)              # 右下
+    points += arc(x1 + r, y2 - r, math.pi * 0.5, math.pi)          # 左下
+    return canvas.create_polygon([c for p in points for c in p],
+                                 smooth=False, **kwargs)
 
 
 class RoundedCard(tk.Frame):
@@ -254,7 +279,7 @@ class ThinScrollbar(tk.Canvas):
 
 
 def flat_button(master, text="", *, command=None, bg=None, fg=None, hover_bg=None,
-                font=None, padx=12, pady=6, image=None, compound="left",
+                hover_fg=None, font=None, padx=12, pady=6, image=None, compound="left",
                 anchor="center", border=None, border_hover=None, **kw):
     """扁平按钮。
 
@@ -264,6 +289,9 @@ def flat_button(master, text="", *, command=None, bg=None, fg=None, hover_bg=Non
     传 ``border`` 可以给按钮加一圈 1px 描边（用 highlight 环实现，因为 ``bd`` 会带回
     立体感）。次要操作加描边后辨识度明显提高，否则在深色底上灰字会显得像被禁用。
 
+    传 ``hover_fg`` 可以让悬停时前景色也变化 —— 关闭按钮（✕）这类纯文字按钮只换底色
+    不够明显。
+
     返回的按钮带一个 ``set_bg(color)`` 方法：外部改底色（例如"已复制"变绿）后，
     悬停离开时会回到**新**底色而不是初始底色。
     """
@@ -271,10 +299,11 @@ def flat_button(master, text="", *, command=None, bg=None, fg=None, hover_bg=Non
     bg = theme.bg_chrome if bg is None else bg
     fg = theme.text_primary if fg is None else fg
     hover_bg = theme.bg_hover if hover_bg is None else hover_bg
+    hover_fg = fg if hover_fg is None else hover_fg
 
     btn = tk.Button(
         master, text=text, command=command, image=image, compound=compound,
-        bg=bg, fg=fg, activebackground=hover_bg, activeforeground=fg,
+        bg=bg, fg=fg, activebackground=hover_bg, activeforeground=hover_fg,
         disabledforeground=theme.text_disabled,
         relief="flat", bd=0, highlightthickness=0, takefocus=0,
         font=font or FONT_BUTTON,
@@ -290,13 +319,13 @@ def flat_button(master, text="", *, command=None, bg=None, fg=None, hover_bg=Non
 
     def _enter(_event):
         if str(btn["state"]) != "disabled":
-            btn.configure(bg=hover_bg)
+            btn.configure(bg=hover_bg, fg=hover_fg)
             if border and border_hover:
                 btn.configure(highlightbackground=border_hover,
                               highlightcolor=border_hover)
 
     def _leave(_event):
-        btn.configure(bg=state["bg"])
+        btn.configure(bg=state["bg"], fg=fg)
         if border:
             btn.configure(highlightbackground=border, highlightcolor=border)
 
@@ -400,3 +429,31 @@ class SegmentedControl(tk.Frame):
         if self._disabled:
             for btn in self._buttons.values():
                 btn.configure(bg=theme.bg_hover, fg=theme.text_disabled)
+
+
+class DragGrip(tk.Canvas):
+    """拖动暗示手柄：几根短横线。
+
+    无边框窗口（``overrideredirect``）没有标题栏，需要在操作栏上放一个"这里可以拖"
+    的视觉提示 —— 否则用户根本不知道窗口能拖。拖动本身由窗口自己绑事件，
+    这个控件只负责"看起来像能拖"。
+
+    ``width`` / ``height`` 是物理像素，所以尺寸全部过 :func:`ui_theme.px`。
+    """
+
+    def __init__(self, master, *, bg=None, color=None, lines=3, **kw):
+        theme = theme_manager.theme
+        bg = bg or theme.bg_chrome
+        color = color or theme.text_tertiary
+
+        line_w = px(master, 13)
+        thickness = max(1, px(master, 1.5))
+        gap = px(master, 3)
+        height = lines * thickness + (lines - 1) * gap
+
+        super().__init__(master, width=line_w, height=height, bg=bg,
+                         bd=0, highlightthickness=0, **kw)
+        for i in range(lines):
+            y = i * (thickness + gap) + thickness / 2.0
+            self.create_line(0, y, line_w, y, fill=color, width=thickness)
+

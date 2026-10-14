@@ -39,7 +39,13 @@ from ui_theme import (
     px,
     theme_manager,
 )
-from ui_widgets import RoundedCard, SegmentedControl, ThinScrollbar, flat_button
+from ui_widgets import (
+    DragGrip,
+    RoundedCard,
+    SegmentedControl,
+    ThinScrollbar,
+    flat_button,
+)
 
 # 正文行距：在字体自身 linespace 之上再补的比例。
 # Tk 的 Text 没有 line-height，只能用 spacing* 模拟，而这三个参数语义不同：
@@ -55,6 +61,11 @@ TEXT_LINE_EXTRA_RATIO = 0.30
 WIN_MIN_W, WIN_MAX_W = 300, 600
 WIN_MIN_H, WIN_MAX_H = 200, 500
 WIN_CHROME_H = 80          # 除图片外要额外留出的高度（操作栏 + 状态栏 + 边距）
+WIN_BAR_H = 46             # 顶部操作栏高度（它同时兼任拖动条）
+
+# 抠窗口圆角用的透明色键。必须是界面上绝不会出现的颜色。
+# 与截图工具栏（screenshot_overlay._TRANSPARENT_KEY）同一套做法。
+_TRANSPARENT_KEY = "#FF00FE"
 
 # 分段选择器的显示文案 -> 内部语言代码
 LANG_LABELS = {"原文": "raw", "中文": "zh", "EN": "en"}
@@ -79,14 +90,10 @@ class OcrWindow:
             self.root = tk.Tk()
 
         self.root.title("OCR 识别")
+        # 标题栏不显示（无边框），但任务栏 / Alt+Tab 里仍然靠它标识窗口，别删。
 
         self._scale = dpi_scale(self.root)
-        win_w, win_h = self._compute_window_size()
-        self.root.geometry(f"{win_w}x{win_h}")
-        self._position_near_region(win_w, win_h)
-
-        self.root.attributes("-topmost", True)
-        self.root.config(bg=theme_manager.theme.bg_primary)
+        self._make_frameless()
 
         self.result = {"done": False, "text": "", "error": None, "error_kind": None}
         self.translations = {}
@@ -97,12 +104,78 @@ class OcrWindow:
         self._polling = False
 
         self._setup_ui()
+
+        # 尺寸必须在 UI 建好之后才算：操作栏的宽度是**实测**出来的，不是猜的。
+        # （旧实现把下限写死成 300 逻辑像素，操作栏里多一个 ✕ 之后就不准了。）
+        self.root.update_idletasks()
+        win_w, win_h = self._compute_window_size()
+
+        # 先隐藏、一次性设好尺寸+位置、再显示。
+        #
+        # 不能先 geometry("WxH") 再 geometry("+X+Y")：**overrideredirect 窗口在映射前
+        # 设置的位置会被丢弃**。实测构造完 geometry() 是 '1x1+0+0'，映射后变成
+        # '624x323+0+0' —— 尺寸生效了、位置没了，窗口永远出现在屏幕左上角。
+        # （无边框之前的版本没这个问题，是加 overrideredirect 时引入的。）
+        self.root.withdraw()
+        self.root.geometry(f"{win_w}x{win_h}+{self._target_x(win_w)}+{self._target_y(win_h)}")
+        self.root.deiconify()
+
+        self.root.attributes("-topmost", True)
+        # 无边框窗口默认拿不到键盘焦点 —— 不强制抢一次的话，
+        # Text 里的 Ctrl+C / 拖选全都失效，用户会以为程序卡了。
+        try:
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+
         self._set_text("正在识别…")
         self._set_status("正在识别…")
 
         self._polling = True
         threading.Thread(target=self._do_ocr, daemon=True).start()
         self._poll_result()
+
+    # ------------------------------------------------------------------ 无边框窗口
+
+    def _make_frameless(self):
+        """去掉原生标题栏，改用自绘操作栏（兼任拖动条 + 关闭按钮）。
+
+        圆角靠 ``-transparentcolor`` 抠：把一个绝不使用的颜色声明为透明色，圆角卡片
+        四个角露出的就是它，窗口看起来就是圆角的。与截图工具栏同一套做法。
+        老系统不支持透明色时退回直角外观，功能不受影响。
+        """
+        self.root.overrideredirect(True)
+        self._transparent = True
+        try:
+            self.root.config(bg=_TRANSPARENT_KEY)
+            self.root.attributes("-transparentcolor", _TRANSPARENT_KEY)
+        except tk.TclError:
+            self._transparent = False
+        self._outer_bg = (_TRANSPARENT_KEY if self._transparent
+                          else theme_manager.theme.border_default)
+
+    def _on_close(self):
+        """自绘的 ✕：没有原生标题栏，关闭只能自己接。
+
+        ``main._do_screenshot`` 给 ``win.root`` 绑了 ``<Destroy>`` 来结束截图会话，
+        所以这里只要销毁窗口，锁和会话容器都会被正确回收。
+        """
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------------ 拖动
+
+    def _start_drag(self, event):
+        self._drag_origin = (event.x_root - self.root.winfo_x(),
+                             event.y_root - self.root.winfo_y())
+
+    def _on_drag(self, event):
+        if not self._drag_origin:
+            return
+        dx, dy = self._drag_origin
+        self.root.geometry(f"+{event.x_root - dx}+{event.y_root - dy}")
 
     # ------------------------------------------------------------------ 几何
 
@@ -112,37 +185,71 @@ class OcrWindow:
         截图坐标与图片尺寸都是**物理像素**，而设计稿上的 300/600/200/500 是逻辑像素。
         不做换算的话，在 150% 缩放的屏幕上窗口会显得比设计稿小一圈，加上按点缩放的
         字号后会非常拥挤。
+
+        宽度下限取**实测的操作栏宽度**，而不是写死的常数：操作栏里放了
+        「拖动手柄 + 复制 + 重新识别 + 原文|中文|EN + ✕」，写死的下限一旦小于实际
+        需求，按钮就会被 packer 挤成 1x1（踩过一次：状态栏整条消失）。
         """
         s = self._scale
-        min_w, max_w = int(WIN_MIN_W * s), int(WIN_MAX_W * s)
-        min_h, max_h = int(WIN_MIN_H * s), int(WIN_MAX_H * s)
+        max_w = int(WIN_MAX_W * s)
+        max_h = int(WIN_MAX_H * s)
+        min_h = int(WIN_MIN_H * s)
         chrome_h = int(WIN_CHROME_H * s)
-        win_w = max(min_w, min(self.img_width, max_w))
-        win_h = max(min_h, min(self.img_height + chrome_h, max_h))
-        return win_w, win_h
 
-    def _position_near_region(self, win_w, win_h):
-        if not self.coords:
-            screen_w = self.root.winfo_screenwidth()
-            screen_h = self.root.winfo_screenheight()
-            self.root.geometry(f"+{(screen_w - win_w) // 2}+{(screen_h - win_h) // 2}")
-            return
+        # 圆角外壳会给内容加一圈内缩。上限是**窗口整体**的尺寸，外壳也算在里面 ——
+        # 否则窗口会比设计稿大出一圈（实测 600 → 616），"不超过 600 逻辑像素"这个
+        # 约定就破了。
+        inset = self.shell.padding * 2 if getattr(self, "shell", None) else 0
 
-        x1, y1, x2, y2 = self.coords
-        gap = px(self.root, 10)
-        target_x = x2 + gap
-        target_y = y1 - gap
+        content_min_w = max(int(WIN_MIN_W * s), self._bar_required_width())
+        content_max_w = max(content_min_w, max_w - inset)
+        content_w = max(content_min_w, min(self.img_width, content_max_w))
 
+        content_max_h = max(min_h, max_h - inset)
+        content_h = max(min_h, min(self.img_height + chrome_h, content_max_h))
+
+        return content_w + inset, content_h + inset
+
+    def _bar_required_width(self):
+        """操作栏真正需要的宽度（物理像素）。
+
+        **不能用 ``self.bar.winfo_reqwidth()``** —— ``bar`` 设了 ``pack_propagate(False)``
+        （为了固定高度），于是它不再按子控件报告宽度，实测恒为 **1**。必须问里面那层
+        会传播尺寸的 ``row``，再加上 ``row`` 两侧的 padx。
+
+        这个下限是真的会生效的：操作栏里是「手柄 + 复制 + 重新识别 + 原文|中文|EN + ✕」，
+        实测需要 641 物理像素。下限给小了 packer 会把最后打包的分段控件挤小
+        （实测 245 → 180，文字被裁），这就是之前踩过的"空间被超额订阅"。
+        """
+        row = getattr(self, "_bar_row", None)
+        if row is None:
+            return 0
+        return row.winfo_reqwidth() + px(row, SPACE_SM) * 2
+
+    def _target_x(self, win_w):
+        """窗口左上角的 x：左边缘与选区对齐，横向只收拢、不翻转。"""
         screen_w = self.root.winfo_screenwidth()
-        screen_h = self.root.winfo_screenheight()
-        if target_x + win_w > screen_w:
-            target_x = x1 - win_w - gap
-        if target_y < 0:
-            target_y = y2 + gap
-        if target_y + win_h > screen_h:
-            target_y = screen_h - win_h - gap
+        if not self.coords:
+            return max(0, (screen_w - win_w) // 2)
+        x1 = self.coords[0]
+        return max(0, min(x1, screen_w - win_w))
 
-        self.root.geometry(f"+{max(0, target_x)}+{max(0, target_y)}")
+    def _target_y(self, win_h):
+        """窗口左上角的 y：默认落在选区**正下方**，下方放不下才翻到上方。
+
+        旧实现摆在选区**右侧**（``target_x = x2 + gap``）。窗口最宽 900 物理像素，
+        一靠屏幕右边就整块翻到选区左侧 —— 右边缘贴着选区、左边缘却甩出去近千像素，
+        用户的感觉是"窗口跑到别处去了"。改成向下展开：视线自然往下走，横向也不跳。
+        """
+        screen_h = self.root.winfo_screenheight()
+        if not self.coords:
+            return max(0, (screen_h - win_h) // 2)
+        _x1, y1, _x2, y2 = self.coords
+        gap = px(self.root, 10)
+        target_y = y2 + gap
+        if target_y + win_h > screen_h:
+            target_y = y1 - win_h - gap
+        return max(0, min(target_y, screen_h - win_h))
 
     # ------------------------------------------------------------------ 界面
 
@@ -150,13 +257,33 @@ class OcrWindow:
         theme = theme_manager.theme
         root = self.root
 
-        # ---------------- 顶部操作栏 ----------------
-        bar = tk.Frame(root, bg=theme.bg_chrome, height=px(root, 50))
+        # ---------------- 圆角外壳 ----------------
+        # 无边框窗口本身是方的；四个角靠 -transparentcolor 抠出来（见 _make_frameless）。
+        # 内容放进 card_bg = bg_chrome 的外壳里，于是四周露出一圈操作栏同色的"边框"，
+        # 顶部操作栏和它自然接上，看不出接缝。
+        self.shell = RoundedCard(
+            root, radius=RADIUS_M, padding=SPACE_XS,
+            card_bg=theme.bg_chrome, outer_bg=self._outer_bg,
+            border=theme.border_default,
+        )
+        self.shell.pack(fill="both", expand=True)
+        shell = self.shell.body
+
+        # ---------------- 顶部操作栏（兼任拖动条） ----------------
+        bar = tk.Frame(shell, bg=theme.bg_chrome, height=px(root, WIN_BAR_H))
         bar.pack(side="top", fill="x")
         bar.pack_propagate(False)
+        self.bar = bar
 
         row = tk.Frame(bar, bg=theme.bg_chrome)
-        row.pack(fill="both", expand=True, padx=px(root, SPACE_MD))
+        row.pack(fill="both", expand=True, padx=px(root, SPACE_SM))
+        self._bar_row = row      # _bar_required_width() 要问它（bar 自己恒报 1）
+
+        # 拖动手柄：整条操作栏都能拖，手柄只是给用户"这里可以拖"的暗示。
+        # 无边框窗口没有标题栏，不给拖动手段的话窗口就钉死在原地了。
+        self.grip = DragGrip(row, bg=theme.bg_chrome,
+                             color=theme.text_tertiary)
+        self.grip.pack(side="left", padx=(0, px(root, SPACE_XS)))
 
         # 复制：主操作，强调色实心
         clip_icon = icons.get_clipboard(theme_manager.accent_fg, master=bar)
@@ -183,6 +310,15 @@ class OcrWindow:
         self.btn_retry._icon_ref = refresh_icon
         self.btn_retry.pack(side="left", padx=(px(root, SPACE_XS), 0))
 
+        # 关闭：没有原生标题栏，必须自己提供一个
+        self.btn_close = flat_button(
+            row, text="✕", command=self._on_close,
+            bg=theme.bg_chrome, fg=theme.text_secondary,
+            hover_bg=theme.bg_hover, hover_fg=theme.text_primary,
+            padx=10, pady=5,
+        )
+        self.btn_close.pack(side="right")
+
         # 翻译目标：原文 / 中文 / EN
         # 注意：这里**不放**"翻译至"标签 —— 620 物理像素（约 413 逻辑像素）的窗口宽度
         # 放不下"复制 + 重新识别 + 标签 + 三段选择器"，实测标签会被 packer 挤成 1x1。
@@ -191,7 +327,14 @@ class OcrWindow:
             row, list(LANG_LABELS.keys()),
             on_change=self._on_lang_change, font=FONT_BUTTON, bg=theme.bg_chrome,
         )
-        self.lang_seg.pack(side="right")
+        self.lang_seg.pack(side="right", padx=(0, px(root, SPACE_XS)))
+
+        # 整条操作栏（含手柄和空白处）都能拖动窗口。
+        # 只绑在 bar / row / grip 上 —— 绑到按钮上会抢走点击。
+        self._drag_origin = None
+        for widget in (bar, row, self.grip):
+            widget.bind("<ButtonPress-1>", self._start_drag)
+            widget.bind("<B1-Motion>", self._on_drag)
 
         # ---------------- 状态栏 ----------------
         # 固定高度的"外框"先于会 expand 的内容区打包 —— 这是 Tk packer 的惯用法：
@@ -203,7 +346,7 @@ class OcrWindow:
         # bar(75) + content(396) + status(42) = 513 已经超出窗口，最后打包的状态栏就被
         # 压成 0 高度、winfo_ismapped() 变 0。已在 RoundedCard 里把 Canvas 的请求尺寸
         # 压到 1x1；这里再保持"先固定、后弹性"的顺序作为双保险。
-        status = tk.Frame(root, bg=theme.bg_status, height=px(root, 28))
+        status = tk.Frame(shell, bg=theme.bg_status, height=px(root, 28))
         status.pack(side="bottom", fill="x")
         status.pack_propagate(False)
 
@@ -221,7 +364,7 @@ class OcrWindow:
         self.lbl_view.pack(side="right", padx=px(root, SPACE_MD + 2))
 
         # ---------------- 文本卡片 ----------------
-        content = tk.Frame(root, bg=theme.bg_primary)
+        content = tk.Frame(shell, bg=theme.bg_primary)
         content.pack(side="top", fill="both", expand=True,
                      padx=px(root, SPACE_MD), pady=px(root, SPACE_MD))
 
