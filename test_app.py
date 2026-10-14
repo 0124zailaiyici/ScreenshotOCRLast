@@ -1211,3 +1211,83 @@ def test_round_rect_has_four_symmetric_corners(tk_root):
     finally:
         cv.destroy()
 
+
+# ---------------------------------------------------------------------------
+# 安装脚本（install.py）
+#
+# 这个脚本会真的改系统（写注册表、建快捷方式），不适合在测试里整体跑一遍 ——
+# 它的正确性是靠**实际安装 + 实际卸载**验证的（装完检查四个位置，跑一遍
+# 卸载.cmd 再看四个位置是不是都空了）。
+#
+# 下面两条只测**生成出来的文本**，也就是那两个真的踩过的坑：它们都是纯字符串
+# 问题，跑一遍系统才能发现的代价太高，值得在这里钉住。
+# ---------------------------------------------------------------------------
+
+def test_uninstaller_registry_path_has_no_double_backslash():
+    """注册表路径不能出现 ``\\\\``。
+
+    `winreg` 会容忍多余的反斜杠，所以安装时看不出问题；但 `卸载.cmd` 里用的是
+    `reg delete`，它不容忍 —— 结果是"应用和功能"里的登记项永远删不掉。
+    """
+    import install
+
+    assert "\\\\" not in install.UNINSTALL_KEY, (
+        f"UNINSTALL_KEY 里有连续两个反斜杠: {install.UNINSTALL_KEY!r} —— "
+        "winreg 能容忍，reg delete 不能，卸载时登记项会删不掉"
+    )
+    assert install.UNINSTALL_KEY.endswith("\\" + install.APP_NAME)
+    assert install.UNINSTALL_KEY.startswith("Software\\Microsoft\\Windows")
+
+
+def test_uninstaller_script_avoids_nested_quotes_and_uses_cmd_c(tmp_path):
+    """卸载脚本必须满足两条，缺一条就删不掉东西或留下黑窗口。
+
+    1. **不能出现嵌套引号**。第一版写的是
+       ``start "" cmd /c "timeout /t 2 & rd /s /q "C:\\路径""`` ——
+       内层引号会和外层配对，`rd` 拿到的路径是断的，目录根本删不掉。
+       正确做法是先把自身复制到 %TEMP% 再重新执行，于是 `rd` 的目标是个
+       普通目录、引号只有一层。
+    2. **重新启动自己必须显式写 `cmd /c`**。直接 ``start "" /min "x.cmd"``
+       时 Windows 会用 `cmd /K` 跑，脚本结束后留下一个不关的黑窗口。
+    """
+    import install
+
+    install_dir = str(tmp_path / "Programs" / "ScreenshotOCR")
+    # _write_uninstaller 假定目录已存在（真实流程里 install() 会先 makedirs）
+    os.makedirs(install_dir, exist_ok=True)
+    path = install._write_uninstaller(install_dir, ["C:\\a.lnk", "C:\\b.lnk"])
+    script = open(path, encoding="utf-8-sig").read()
+    lines = [ln.strip() for ln in script.splitlines()]
+
+    # 1. 删除目录那行只能有一对引号（路径本身那对）
+    rd_lines = [ln for ln in lines if ln.startswith("rd ")]
+    assert len(rd_lines) == 1, f"应当只有一条 rd 命令，实际: {rd_lines}"
+    assert rd_lines[0].count('"') == 2, (
+        f"rd 那行出现了嵌套引号: {rd_lines[0]!r} —— "
+        "内层引号会和外层配对，路径会断掉、目录删不掉"
+    )
+    assert install_dir in rd_lines[0]
+
+    # 2. `start` 那一行：`start "" /min cmd /c "路径"`
+    #    `""` 是 start 的标题占位（必需，否则第一个带引号的参数会被当成标题），
+    #    所以这一行**正常就有 4 个引号**。真正要防的是老写法
+    #    `start "" cmd /c "timeout /t 2 & rd /s /q "C:\路径""` ——
+    #    那里 cmd /c 后面的参数**内部又出现了引号**，会被外层提前截断。
+    start_lines = [ln for ln in lines if ln.startswith("start ")]
+    assert start_lines, "脚本里应当有重新启动自身的那一行"
+    for ln in start_lines:
+        assert 'cmd /c "' in ln, (
+            f"重新启动自身时没有显式写 cmd /c: {ln!r} —— "
+            "start 一个 .cmd 会用 cmd /K 跑，跑完留下一个不关的黑窗口"
+        )
+        argument = ln.split('cmd /c "', 1)[1]
+        assert argument.endswith('"'), f"cmd /c 的参数没有正常收尾: {ln!r}"
+        assert '"' not in argument[:-1], (
+            f"cmd /c 的参数内部又出现了引号: {ln!r} —— "
+            "内层引号会和外层配对，路径会断掉"
+        )
+
+    # 4. 复制到 %TEMP% 再执行，这是"不删自己所在目录"的关键
+    assert any(ln.startswith("copy ") and "%TEMP%" in ln for ln in lines), \
+        "脚本没有先把自身复制到 %TEMP% —— 批处理删不掉自己所在的目录"
+

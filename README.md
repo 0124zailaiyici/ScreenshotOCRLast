@@ -71,13 +71,35 @@ RapidOCR 的 onnxruntime 与 numpy 同样延迟加载 —— 只启动不识别�
 ### 环境要求
 
 - Windows 10/11
-- Python 3.10+
-- **Tesseract-OCR 5.x**：
-  - 请从 [UB-Mannheim/tesseract](https://github.com/UB-Mannheim/tesseract/wiki) 下载 Windows 安装包。
-  - 安装时请勾选 **"Additional language data (download)"** 中的 **"Chinese"** 相关选项以支持中文识别。
-  - 程序会自动尝试在 `C:\Program Files\Tesseract-OCR` 搜索，若安装在其他目录，请在程序提示时手动指定 `tesseract.exe` 路径。
+- Python 3.10+（**仅源码运行需要**；用装好的 EXE 不需要装 Python）
+- **Tesseract-OCR 5.x**（**可选**）：
+  - **默认引擎 RapidOCR 不需要它** —— 模型已随程序打包，装上就能用中文识别。
+  - 只有想用 Tesseract 引擎（托盘菜单里可切）时才需要：[UB-Mannheim/tesseract](https://github.com/UB-Mannheim/tesseract/wiki)，安装时勾选 **"Additional language data (download)"** 里的 **"Chinese"**。
+  - 程序会自动在 `C:\Program Files\Tesseract-OCR` 搜索，装在别处时会在提示里让你手动指定 `tesseract.exe` 路径。
 
-### 快速开始
+### 安装（推荐，装完从开始菜单/桌面打开）
+
+```bash
+python build_exe.py     # 先打包
+python install.py       # 再安装
+```
+
+装完之后：
+
+- **开始菜单**搜索「截图」或「ScreenshotOCR」即可打开
+- **桌面**有快捷方式
+- 「设置 → 应用 → 已安装的应用」里有卸载入口；也可以直接运行安装目录下的 `卸载.cmd`
+
+安装位置是 `%LOCALAPPDATA%\Programs\ScreenshotOCR`，**全程不需要管理员权限**，也不会往 `Program Files` 写东西。
+
+几个刻意的取舍：
+
+- **不设开机自启**。它是托盘常驻工具，重启后需要自己打开一次 `Alt+X` 才生效 —— 要不要自启由你决定，安装脚本不替你做。
+- **卸载不动用户数据**：配置、钉住图片、翻译历史都在 `%APPDATA%\ScreenshotOCR`，卸载后仍在，重装后设置还在。
+- **不打包成 Inno Setup / NSIS 安装程序**：这是单文件绿色 exe，"安装"本质上就是"放个固定位置 + 建快捷方式 + 留个卸载入口"，为它引入一整套安装框架并不划算。
+
+### 直接从源码运行
+
 1. **安装依赖**：
    ```bash
    pip install -r requirements.txt
@@ -86,15 +108,6 @@ RapidOCR 的 onnxruntime 与 numpy 同样延迟加载 —— 只启动不识别�
    ```bash
    python main.py
    ```
-
-### 打包为 EXE
-如果你想在桌面直接点击运行，可以执行以下命令：
-```bash
-python build_exe.py
-```
-打包完成后，你可以在 `dist/` 目录下找到 `ScreenshotOCR.exe`。将它复制到桌面即可。
-
-打包脚本会在结束后**自检产物**：读回 exe、核对必需模块是否齐全、该排除的（pandas/numpy 等）是否确实没进去，不合格就以非零码退出。这样"看起来打包成功、用起来缺功能"的情况不会悄悄溜过去。
 3. **运行测试**：
    ```bash
    pytest test_app.py test_integration.py test_pin_logic.py
@@ -103,6 +116,18 @@ python build_exe.py
    ```bash
    python verify_app.py
    ```
+
+### 打包为 EXE
+
+```bash
+python build_exe.py
+```
+
+打包完成后在 `dist/` 目录下得到 `ScreenshotOCR.exe`，也可以直接双击运行（只是没有快捷方式）。
+
+打包脚本会在结束后**自检产物**：读回 exe、核对必需模块与**数据文件**（RapidOCR 的三个 ONNX 模型）是否齐全、该排除的（pandas 等）是否确实没进去，不合格就以非零码退出。这样"看起来打包成功、用起来缺功能"的情况不会悄悄溜过去 —— 这道检查真的拦下过一次漏打的模型文件。
+
+图标由 `python make_icon.py` 生成到 `assets/app.ico`（设计与托盘图标一致），打包时通过 `--icon` 嵌入。
 
 ## 4. API 与模块说明
 
@@ -126,6 +151,18 @@ python build_exe.py
 本项目采用 [MIT License](LICENSE) 开源许可证。
 
 ## 7. 更新日志 (Changelog)
+
+### [v1.4.1] - 2026-10-15
+
+**装到开始菜单了，也有了自己的图标**
+
+- **\[Feature]** 新增 `install.py`：装到 `%LOCALAPPDATA%\Programs\ScreenshotOCR`，建**开始菜单**与**桌面**快捷方式，并在「应用和功能」里登记卸载入口。全程不需要管理员权限。
+  - **桌面路径必须问 shell 拿**，不能拼 `%USERPROFILE%\Desktop` —— 这台机器的桌面是 `D:\桌面`（被重定向过），硬拼出来的快捷方式用户根本看不见。
+  - **卸载脚本要先把自己复制到 `%TEMP%` 再重新执行**：批处理删不掉自己所在的目录。常见的绕法 `start "" cmd /c "... rd /s /q "路径""` 里那层**嵌套引号在 cmd 里极不可靠**，`rd` 拿到的路径是断的、目录根本删不掉（第一版就是这么写的，跑一遍才发现）。
+  - `start` 一个 `.cmd` 时 Windows 会用 **`cmd /K`**，脚本跑完留下一个不关的黑窗口 —— 必须显式写 `cmd /c`。
+- **\[Feature]** 新增 `make_icon.py`，从**托盘图标的同一套设计**生成 `assets/app.ico`（透明底，含 16~256 共 7 个尺寸），打包时用 `--icon` 嵌入。之前一直用的是 PyInstaller 默认图标，装到开始菜单里很难看。
+- **\[Fix]** `install.py` 的覆盖安装会因为 `taskkill` 是**异步**的而失败（`PermissionError: [Errno 13]`）—— 它返回时进程只是收到终止信号、文件句柄还没释放。现在会轮询等进程真的消失。
+- **\[Fix]** `UNINSTALL_KEY` 里 `r"...\Uninstall\\" + APP_NAME` 拼出了**两个**反斜杠。`winreg` 容忍它，但 `reg delete` 不容忍，卸载时登记项删不掉。
 
 ### [v1.4.0] - 2026-10-15
 

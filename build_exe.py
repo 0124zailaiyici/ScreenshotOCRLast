@@ -175,6 +175,10 @@ def build():
         '--noconsole',          # 运行时不显示控制台
         '--clean',              # 打包前清理临时文件
 
+        # 程序图标。不指定的话会一直用 PyInstaller 的默认图标，装到开始菜单/
+        # 桌面之后很难看。由 make_icon.py 生成，设计与托盘图标一致。
+        '--icon=assets/app.ico',
+
         # 强制包含的关键动态库
         '--hidden-import=pystray',
         '--hidden-import=pynput',

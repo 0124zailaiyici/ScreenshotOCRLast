@@ -61,7 +61,9 @@ Windows 截图工具，支持截图后三选一操作：钉住到屏幕、OCR �
 ├── test_pin_logic.py         # 集成测试：钉住窗口位置 / 边界 / 持久化
 ├── verify_app.py             # 真实自检脚本（会失败、非零退出码）
 ├── build_exe.py              # PyInstaller 打包脚本
-├── assets/                   # 本地资源目录
+├── make_icon.py              # 生成 assets/app.ico（设计与托盘图标一致）
+├── install.py                # 安装/卸载：放固定位置 + 建快捷方式 + 登记卸载入口
+├── assets/                   # 本地资源目录（app.ico）
 └── requirements.txt
 ```
 
@@ -169,6 +171,38 @@ pyinstaller --noconsole --onefile --name "ScreenshotOCR" \
 ### 体积
 
 打包两个引擎后 EXE 是 **117.4 MB**（只打 Tesseract 时是 36.2 MB）。构成：onnxruntime `capi` 约 37.6MB、numpy 约 15MB、三个 ONNX 模型约 15.4MB，其余是原有的 36MB。这是「中文识别准确率」的代价，**不是配置问题，压不下去** —— onnxruntime 的 DLL 和模型都是必需项。
+
+### 图标
+
+`python make_icon.py` 生成 `assets/app.ico`（透明底，16/24/32/48/64/128/256 共 7 个尺寸），`build_exe.py` 用 `--icon` 嵌入。设计复用**托盘图标那台相机**，所以任务栏 / 开始菜单 / 托盘三处图形一致。
+
+- **先按 64 的原始坐标放大 16 倍画到 1024，再交给 Pillow 逐级缩小**。直接在小画布上画，细线会糊成一团 —— 这是图标的标准做法。
+- **透明底**，而托盘图标是实心方块（深色模式下就是一块深灰）。装到开始菜单里是个方块会很难看。
+- 颜色**钉死**成项目主色，不用系统强调色 —— 图标是固定的品牌资产，不该随用户设置变化。
+
+### 安装与分发（`install.py`）
+
+```bash
+python install.py              # 安装（默认装完启动）
+python install.py --no-start   # 安装但不启动
+python install.py --uninstall  # 卸载
+```
+
+装到 `%LOCALAPPDATA%\Programs\ScreenshotOCR`，建开始菜单 + 桌面快捷方式，并在 `HKCU\...\Uninstall\ScreenshotOCR` 登记「应用和功能」条目。**全程不需要管理员权限**，不往 `Program Files` 写东西。
+
+**不打包成 Inno Setup / NSIS**：这是单文件绿色 exe，"安装"本质只有三步（放固定位置、建快捷方式、留卸载入口），为它引入一整套安装框架不划算。
+
+踩过的坑，改这里之前先看：
+
+- **桌面路径必须问 shell 拿**（`SHGetFolderPathW(CSIDL_DESKTOPDIRECTORY)`），**不能拼 `%USERPROFILE%\Desktop`**。本机桌面就是 `D:\桌面`（被重定向过），硬拼出来的快捷方式用户根本看不见。开始菜单同理。
+- **`taskkill` 是异步的**：它返回时进程只是"收到终止信号"，文件句柄还没释放，紧接着复制 exe 会 `PermissionError: [Errno 13]`。覆盖安装必现（第一次安装不现，因为旧实例跑的是 `dist\` 里的另一个文件）。`_stop_running()` 必须轮询等进程真的消失。
+- **批处理删不掉自己所在的目录**。所以 `卸载.cmd` 先把自身复制到 `%TEMP%` 再重新执行，于是 `rd` 的目标是个普通目录。**不要用** `start "" cmd /c "... rd /s /q "路径""` 那种绕法 —— 嵌套引号在 cmd 里极不可靠，内层引号会和外层配对，`rd` 拿到的路径是断的、目录根本删不掉（第一版就这么写的，跑一遍才发现）。
+- **`start` 一个 `.cmd` 时 Windows 会用 `cmd /K`**，脚本跑完留下一个不关的黑窗口。必须显式写 `start "" /min cmd /c "路径"`。
+- **COM 对象要在 `CoUninitialize()` 之前丢掉引用**（`del link, shell`），否则每次建快捷方式都会往 stderr 吐一行 `Win32 exception occurred releasing IUnknown`。
+- **`UNINSTALL_KEY` 别写成 `r"...\Uninstall\\" + APP_NAME`** —— 原始字符串末尾的 `\\` 是**两个**反斜杠。`winreg` 容忍，`reg delete` 不容忍，卸载时登记项就删不掉。
+- **卸载不动用户数据**：`%APPDATA%\ScreenshotOCR`（配置、钉住图片、翻译历史）保留，重装后设置还在。
+- **不设开机自启**：这是用户明确选的（托盘工具确实需要常驻才能用热键，但不替用户决定）。
+- **Task Manager 里会看到两个同名进程**：PyInstaller onefile = 引导器父进程（约 7.6MB）+ 解包后的真身（几十 MB）。正常现象，不是跑了两个实例。
 
 ## 依赖
 
