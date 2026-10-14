@@ -14,11 +14,31 @@ from config import config_manager
 # 注意：**不要**在模块顶层 import translators，那会让每次启动都白付这份开销。
 _translators_module = None
 
+# translators 在**导入期**就会发网络请求探测所在地区：它的模块体里直接写了
+# ``tss = TranslatorsServer()``（server.py:6205），构造函数又调用
+# ``get_region_of_server()``（server.py:5896），后者去请求
+# geolocation.onetrust.com，失败再退到 httpbin.org（server.py:364）。
+# 两个后果都很糟：
+#   1. 探测失败会抛 TranslatorError，**整个 import 直接失败** —— 用户点「翻译」
+#      看到的是一个跟 httpbin.org 有关的报错；
+#   2. 那两次 requests.get **没有设 timeout**，网络不通时可能挂很久。
+# server.py:344 留了逃生口：只要 ``translators_default_region`` 有值，
+# ``get_region_of_server`` 就在第一行直接返回（server.py:347-350），不发任何请求。
+# 所以在导入前钉住地区 —— 本程序面向中文用户，选 CN（Google 等服务会走国内可用域名）。
+# 用 setdefault 是为了不覆盖用户自己设的值；非中国大陆用户可设
+# ``translators_default_region=EN`` 覆盖。
+_DEFAULT_REGION = "CN"
+
 
 def _translators():
-    """延迟加载 translators，只在真正需要翻译时才付那份内存与时间。"""
+    """延迟加载 translators，只在真正需要翻译时才付那份内存与时间。
+
+    导入前会先钉住地区，避免 translators 在导入期发网络请求 —— 详见
+    ``_DEFAULT_REGION`` 上方的说明。
+    """
     global _translators_module
     if _translators_module is None:
+        os.environ.setdefault("translators_default_region", _DEFAULT_REGION)
         import translators
         _translators_module = translators
     return _translators_module

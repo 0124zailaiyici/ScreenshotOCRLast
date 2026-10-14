@@ -158,7 +158,7 @@ pytest>=7.0.0        # 单元测试框架
 ## 测试与验证
 
 ```bash
-pytest test_app.py test_integration.py test_pin_logic.py   # 55 个用例
+pytest test_app.py test_integration.py test_pin_logic.py   # 58 个用例
 python verify_app.py                                       # 环境自检，失败返回非零退出码
 ```
 
@@ -180,6 +180,8 @@ python verify_app.py                                       # 环境自检，失�
 - **Tesseract 子进程必须无控制台窗口**：本程序是 GUI 进程（`pythonw` / PyInstaller `--noconsole`），自身没有控制台。这类进程 spawn 一个**控制台子系统**程序时，Windows 会为子进程新建一个控制台窗口；用裸 `subprocess` 调用时该窗口**可见**，用户看到的就是「识别时一个空白小窗口一闪而过」。实测（由子进程自报 `GetConsoleWindow` + `IsWindowVisible`）：裸调用 → 有控制台且**可见**；`STARTF_USESHOWWINDOW`+`SW_HIDE` → 有控制台但不可见；`CREATE_NO_WINDOW` → 根本不创建控制台。**只有 `CREATE_NO_WINDOW` 可靠**。pytesseract 仅在 `run_tesseract()` 里做了抑制，而 `get_tesseract_version()` / `get_languages()` 是裸调用 —— 因此 `ocr_engine` 在 import 时把 `pytesseract.pytesseract.subprocess` 整体替换成 `_HiddenSubprocess`（注入 `creationflags=CREATE_NO_WINDOW`）。`test_app.py::test_tesseract_subprocess_never_creates_a_console_window` 是这条的回归防护，不要删除或简化。
 - **`is_available()` 必须缓存**：OCR 窗口每次识别都会调用它，而它内部走 `pytesseract.get_tesseract_version()` —— 那是一次真实的 tesseract 进程 spawn。不缓存时每次识别要多花约 **500ms**（其中大部分是创建控制台窗口的开销；修复后约 60ms）。`ocr_engine._availability_cache` 以 tesseract 可执行文件路径为键，用户在「指定路径」引导里改过路径后会立刻重新检查，无需重启。
 - **`translators` 必须延迟导入**：它的依赖树极重 —— 实测 `import translators` 耗时 **约 2.4 秒**、工作集 **+48MB**，占整个程序内存的 **80%**。它一次拖进 aiohttp / httpx / niquests / requests **四套 HTTP 客户端**，外加 `cryptography`、`lxml`、`multiprocess`、`pathos`、`psutil`、`tqdm` 等 40 多个包。而翻译只是 OCR 之后的次要功能，多数会话根本用不到。因此 `translator.py` 用 `_translators()` 在**首次真正翻译时**才导入，**绝不允许**在模块顶层写 `import translators`。实测收益：源码启动工作集 74.7M → 26.9M，打包后 EXE 119.8M → 59.6M，启动也快了 2.4 秒。`test_app.py::test_translator_does_not_import_the_heavy_engine_at_module_level` 是这条的回归防护。
+- **`translators` 导入前必须钉住地区**：`import translators` **在导入期就会发网络请求** —— 它的模块体里直接写了 `tss = TranslatorsServer()`（`server.py:6205`），构造函数调用 `get_region_of_server()`（`server.py:5896`），后者请求 `geolocation.onetrust.com`、失败再退到 `httpbin.org`（`server.py:364`）。两个后果都很糟：① 探测失败抛 `TranslatorError`，**整个 import 直接失败** —— 用户点「翻译」看到的是一个跟 httpbin.org 有关的报错（实测 25 次独立进程里挂 2 次，`verify_app.py` 也因此随机失败）；② 那两次 `requests.get` **没设 timeout**，网络不通时可能挂很久。`server.py:344` 留了逃生口：`translators_default_region` 有值就在第一行直接返回、不发请求。所以 `translator._translators()` 在 `import translators` **之前**先 `os.environ.setdefault("translators_default_region", "CN")`（`_DEFAULT_REGION`）—— **顺序错了就等于没修**。用 `setdefault` 是为了不覆盖用户自己设的值，非中国大陆用户可设 `EN` 覆盖。回归防护：`test_app.py::test_translator_pins_the_region_before_importing_translators`（检查顺序）、`test_translator_does_not_override_a_user_chosen_region`、`test_translator_loads_without_any_network`（把 `socket.socket` 换成连接必抛异常的类，**断网也必须能加载**）。
+- **`verify_app.py` 的依赖检查不能直接 `import translators`**：理由同上，那样会依赖网络、随机失败。它走应用自己的 `translator._translators()`，既稳定，测的又是应用真正使用的那条路径。
 - **延迟导入的内存收益有前提：本次运行没点过翻译**。Python 无法可靠卸载已导入的模块 —— 用户第一次点「中文/英文」后，那 48MB 会一直留到程序重启（实测 50MB → 100MB）。**不要试图用 `del sys.modules["translators"]` 去"回收"**：它不会把内存还给操作系统，强行重新导入还有崩溃风险。真要"用完就降回来"，只能把翻译做成用完即退的独立子进程，复杂度明显上升，目前不做。
 - **内存基线**（空转、无翻译，用于回归对比）：打包后 EXE **约 50~60MB 工作集 / 约 50MB 私有 / 10 个线程 / 空闲 CPU 0.000%**。逐阶段构成：空解释器 14.5M、tkinter +3.6M、Pillow +4.4M、pystray +1.7M、pynput +0.4M、pywin32 +1.4M、pytesseract +0.2M、**本项目全部模块 +0.3M**。也就是说内存几乎全由第三方库决定，**优化要往"少加载/晚加载第三方包"方向做，改自己的代码没有意义**。注意 `tesseract.exe` 是每次识别 spawn 的子进程、用完即退，它的内存从不计入本进程。
 - **UI 主题与自绘控件**：`ui_theme.py` 是唯一的颜色/字体/间距来源，`ui_widgets.py` 放 Tk 原生做不到的件（圆角卡片、细滚动条、扁平按钮、分段选择器）。改界面前先读这两个文件的模块注释。

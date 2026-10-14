@@ -329,6 +329,120 @@ def test_translator_does_not_import_the_heavy_engine_at_module_level(tmp_path):
     assert "OK" in result.stdout
 
 
+def test_translator_pins_the_region_before_importing_translators(monkeypatch):
+    """回归防护：导入 translators **之前**必须先钉住地区。
+
+    踩过的坑：``import translators`` 会在**导入期发网络请求**探测所在地区 ——
+    它的模块体里直接写了 ``tss = TranslatorsServer()``（server.py:6205），
+    构造函数调用 ``get_region_of_server()``（server.py:5896），后者请求
+    geolocation.onetrust.com、失败再退到 httpbin.org（server.py:364）。
+    于是：
+
+    - 探测失败会抛 ``TranslatorError``，**整个 import 直接失败** —— 用户点
+      「翻译」看到的是一个跟 httpbin.org 有关的报错（实测 25 次独立进程里挂 2 次）；
+    - 那两次 ``requests.get`` **没有设 timeout**，网络不通时可能挂很久。
+
+    ``server.py:344`` 留了逃生口：``translators_default_region`` 有值就直接返回、
+    不发任何请求。所以必须在 import 之前把它设好 —— 顺序错了就等于没修。
+    """
+    import builtins
+
+    import translator as translator_module
+
+    monkeypatch.delenv("translators_default_region", raising=False)
+    monkeypatch.setattr(translator_module, "_translators_module", None)
+
+    seen = {}
+    fake = type("FakeTranslators", (), {})()
+
+    real_import = builtins.__import__
+
+    def spy_import(name, *args, **kwargs):
+        if name == "translators":
+            # 记录"导入发生的那一刻"环境变量的值
+            seen["region"] = os.environ.get("translators_default_region")
+            return fake
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", spy_import)
+
+    assert translator_module._translators() is fake
+    assert seen.get("region") == translator_module._DEFAULT_REGION, (
+        "translators 是在地区被钉住之前导入的 —— 它会在导入期发网络请求，"
+        "网络一抖整个 import 就失败"
+    )
+
+
+def test_translator_does_not_override_a_user_chosen_region(monkeypatch):
+    """用户自己设了 ``translators_default_region`` 就必须尊重，不能被覆盖成 CN。
+
+    非中国大陆的用户可以设 ``EN`` 来使用国际版后端，钉地区只应该是兜底默认值。
+    """
+    import builtins
+
+    import translator as translator_module
+
+    monkeypatch.setenv("translators_default_region", "EN")
+    monkeypatch.setattr(translator_module, "_translators_module", None)
+
+    fake = type("FakeTranslators", (), {})()
+    real_import = builtins.__import__
+
+    def spy_import(name, *args, **kwargs):
+        if name == "translators":
+            return fake
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", spy_import)
+
+    translator_module._translators()
+    assert os.environ["translators_default_region"] == "EN"
+
+
+def test_translator_loads_without_any_network(tmp_path):
+    """回归防护：**断网时翻译栈也必须能加载**。
+
+    这条是上面那条的端到端版本，也是最有力的证据 —— 不模拟"网络慢"，而是把
+    ``socket.socket`` 直接换成连接必抛异常的类，任何真实网络请求都必然失败。
+
+    修复前实测：``translator._translators()`` 抛
+    ``TranslatorError: Unable to connect the Internet. Try
+    os.environ["translators_default_region"] = "EN" or "CN" before import translators``
+    —— 用户点「翻译」看到的就是这个跟 httpbin.org 有关的报错。
+    修复后实测：1.15 秒导入成功。
+
+    必须开子进程：同进程内 translators 可能已被别的测试导入，断言会失真。
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import socket, sys\n"
+        "class _Blocked(socket.socket):\n"
+        "    def connect(self, *a, **k):\n"
+        "        raise OSError('network blocked by test')\n"
+        "socket.socket = _Blocked\n"
+        "socket.create_connection = lambda *a, **k: (_ for _ in ()).throw(\n"
+        "    OSError('network blocked by test'))\n"
+        "import translator\n"
+        "translator._translators()\n"
+        "print('OK')\n"
+    )
+    env = dict(os.environ, APPDATA=str(tmp_path), PYTHONIOENCODING="utf-8")
+    env.pop("translators_default_region", None)  # 模拟用户没自己设过
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, timeout=300,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        env=env,
+    )
+    assert result.returncode == 0, (
+        "断网时 translators 加载失败 —— 它在导入期发了网络请求。\n"
+        f"stdout={result.stdout}\nstderr={result.stderr}"
+    )
+    assert "OK" in result.stdout
+
+
 # ---------- 主题与自绘控件 ----------
 
 def test_px_converts_logical_pixels_by_dpi():

@@ -28,17 +28,32 @@ def check_python_version():
 
 
 def check_dependencies():
+    """第三方依赖都要能导入。
+
+    ``translators`` **不能**直接 ``importlib.import_module`` —— 它在导入期会发网络
+    请求探测地区，网络一抖就抛 TranslatorError，于是这项检查会随机失败（实测
+    25 次里挂 2 次）。走应用自己的 ``translator._translators()``：那条路径会先钉住
+    地区，不碰网络。这样检查既稳定，测的又是应用真正使用的那条路径。
+    """
     import importlib
-    required = ["PIL", "pytesseract", "pystray", "pynput", "win32clipboard", "translators"]
+    required = ["PIL", "pytesseract", "pystray", "pynput", "win32clipboard"]
     missing = []
     for mod in required:
         try:
             importlib.import_module(mod)
         except Exception as e:
             missing.append(f"{mod} ({type(e).__name__})")
+
+    # translators 走应用自己的延迟加载入口
+    try:
+        from translator import _translators
+        _translators()
+    except Exception as e:
+        missing.append(f"translators ({type(e).__name__}: {e})")
+
     if missing:
         raise AssertionError("无法导入: " + ", ".join(missing))
-    return f"{len(required)} 个依赖全部可导入"
+    return f"{len(required) + 1} 个依赖全部可导入"
 
 
 def check_config_roundtrip():

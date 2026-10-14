@@ -116,6 +116,17 @@ python build_exe.py
 
 ## 7. 更新日志 (Changelog)
 
+### [v1.3.2] - 2026-10-14
+
+**修掉「翻译偶发失败」：`translators` 在导入期发网络请求**
+
+起因是 `verify_app.py` 的自检**时好时坏**（连跑 25 次挂 2 次）。查下去发现不是自检的问题：
+
+- **\[Fix]** `import translators` **在导入期就会发 HTTP 请求**探测所在地区 —— 它的模块体里直接写了 `tss = TranslatorsServer()`（`server.py:6205`），构造函数调用 `get_region_of_server()`（`server.py:5896`），后者请求 `geolocation.onetrust.com`、失败再退到 `httpbin.org`（`server.py:364`）。探测失败会抛 `TranslatorError`，**整个 import 直接失败** —— 用户点「翻译」看到的就是一个跟 httpbin.org 有关的报错。而且那两次 `requests.get` **没设 timeout**，网络不通时还可能挂很久
+- **\[Fix]** 修法是 `server.py:344` 自己留的逃生口：只要 `translators_default_region` 有值，`get_region_of_server` 就在第一行直接返回、不发任何请求。现在 `translator._translators()` 在 `import translators` **之前**先钉住地区（默认 `CN`，用 `setdefault` 所以不覆盖用户自己设的值；非中国大陆用户可设 `EN`）
+- **\[Fix]** `verify_app.py` 的依赖检查不再直接 `import translators`，改走应用自己的 `translator._translators()` —— 既不再依赖网络，测的又是应用真正使用的那条路径
+- **\[Test]** 测试 55 → **58 个**。新增 3 条防护，其中最有力的一条把 `socket.socket` 换成连接必抛异常的类，**断网也必须能加载**：修复前实测抛 `TranslatorError: Unable to connect the Internet`，修复后 1.15 秒加载成功
+
 ### [v1.3.1] - 2026-10-13
 
 **对抗式复核后的修复：3 条 MAJOR + 7 条 MINOR**
