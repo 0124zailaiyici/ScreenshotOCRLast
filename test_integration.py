@@ -283,3 +283,64 @@ def test_icon_sync_requires_a_root(monkeypatch):
     monkeypatch.setattr(tkinter, "_default_root", None)
     with pytest.raises(RuntimeError):
         IconProvider()._sync(None)
+
+
+def test_overlay_crops_the_frozen_screenshot_instead_of_regrabbing(tk_root, monkeypatch):
+    """回归防护：选区图必须从**已经拍好的**全屏截图里裁，不能再抓一次屏幕。
+
+    踩过的坑：``_on_button_release`` 里原本用 ``ImageGrab.grab(bbox=...)`` 重新抓屏，
+    但此时覆盖层窗口**还显示着**，而选区边框（3px 白框 + 1px 虚线强调框）就画在选区
+    边缘上 —— 于是边框被一起抓进了识别输入。
+
+    实测（真实渲染的中文+英文文字，紧贴文字裁剪）：
+
+        不带边框  准确率 90.0%
+        带边框    准确率  4.3%   <-- 用户贴着文字选是最自然的选法，触发率极高
+
+    留白 6px 以上时边框落在空白处、实测无影响，所以这个 bug 只在"选得紧"时发作，
+    从偶发现象很难反推原因 —— 必须有这条防护钉住。
+
+    判定方式：抓屏函数的调用次数。构造时允许抓一次（冻结全屏图），
+    之后**绝不允许**再抓 —— 再抓就意味着把覆盖层自己也拍了进去。
+    """
+    from PIL import Image
+
+    import screenshot_overlay as overlay_module
+
+    grab_calls = []
+
+    def fake_grab(**kwargs):
+        # 每次返回颜色不同的图，方便识别"是不是又抓了一次"
+        img = Image.new("RGB", (400, 300), (10 * len(grab_calls), 0, 0))
+        grab_calls.append(kwargs)
+        return img
+
+    monkeypatch.setattr(overlay_module.ImageGrab, "grab", fake_grab)
+
+    overlay = overlay_module.ScreenshotOverlay(
+        on_select_callback=lambda *a: None, master=tk_root)
+    try:
+        assert len(grab_calls) == 1, "构造覆盖层时应当只抓一次屏（冻结全屏图）"
+        frozen = overlay.full_screenshot
+
+        overlay.start_x, overlay.start_y = 50, 40
+
+        class _Release:
+            x, y = 150, 120
+
+        overlay._on_button_release(_Release())
+
+        assert len(grab_calls) == 1, (
+            "抓完选区后又抓了一次屏幕 —— 覆盖层的选区边框会被拍进识别输入，"
+            "实测紧贴文字选时识别率从 90% 掉到 4%"
+        )
+        expected = frozen.crop((50, 40, 150, 120))
+        assert overlay.selection_img.tobytes() == expected.tobytes(), (
+            "选区图应当是冻结全屏图的对应裁剪"
+        )
+        assert overlay.selection_coords == (50, 40, 150, 120)
+    finally:
+        try:
+            overlay.root.destroy()
+        except Exception:
+            pass

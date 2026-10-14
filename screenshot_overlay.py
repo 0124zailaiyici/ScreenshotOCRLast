@@ -104,7 +104,18 @@ class ScreenshotOverlay:
             return
 
         self.selection_coords = (x1, y1, x2, y2)
-        self.selection_img = ImageGrab.grab(bbox=(x1, y1, x2, y2), all_screens=True)
+        # 从**已经拍好的**全屏截图里裁剪，而**不是**再抓一次屏幕。
+        #
+        # 踩过的坑：此时覆盖层窗口还显示着，而选区边框（3px 白框 + 1px 虚线强调框）
+        # 就画在选区边缘上 —— 再抓一次屏幕会把边框一起抓进去。实测（真实渲染的文字，
+        # 紧贴文字裁剪）：不带边框 90% 准确率，带边框直接崩到 **4.3%**。用户贴着文字选
+        # 是最自然的选法，所以这个 bug 的触发率极高。
+        # （选区留白 6px 以上时边框落在空白处，实测无影响 —— 所以它只在"选得紧"时发作，
+        #   极难从偶发现象反推原因。）
+        #
+        # 用冻结图还有两个附带好处：不受"抓图期间屏幕内容变化"影响（用户看到的就是
+        # 识别的那张），且省掉一次全屏抓取。
+        self.selection_img = self.full_screenshot.crop((x1, y1, x2, y2))
         self._show_toolbar(x2, y2)
 
     # 抠圆角用的透明色键。必须是界面上绝不会出现的颜色。
