@@ -28,10 +28,43 @@ class IconProvider:
         root = master._root() if master is not None else tkinter._default_root
         if root is None:
             raise RuntimeError("创建图标前必须先存在 Tk root")
+
+        # 除了比对身份，还要确认这个解释器**仍然存活**：``Misc._root()`` 只是纯 Python
+        # 的属性遍历，一个已经被 destroy() 的 root 仍然等于它自己。只比对身份的话，
+        # 「root 被销毁 → 又向它要图标」会命中旧缓存，返回上一轮那个已被 Tcl 删除的
+        # PhotoImage，配到活控件上就是 ``TclError: image "pyimageN" doesn't exist``
+        # —— 正是本类要防的那个错误。
+        if not self._is_alive(root):
+            self._cache.clear()
+            self._cache_root = None
+            # 解释器已经没了，这里不存在任何合法图标可给。宁可当场抛一个说得清的错，
+            # 也不要返回死句柄 —— 后者会在毫不相干的地方（把图标配到某个活控件时）
+            # 炸成 ``image "pyimageN" doesn't exist``，极难定位。
+            raise RuntimeError("目标 Tk root 已被销毁，无法创建图标")
+
         if root is not self._cache_root:
             self._cache.clear()
             self._cache_root = root
         return root
+
+    @staticmethod
+    def _is_alive(root):
+        """解释器是否仍然存活。
+
+        ``winfo_exists()`` 在解释器已销毁时会抛
+        ``TclError: can't invoke "winfo" command: application has been destroyed``，
+        因此必须包起来 —— "是否存活"只有 Tcl 知道，纯 Python 侧看不出来。
+
+        没有 ``winfo_exists`` 的对象按存活处理：那不是真的 Tk 解释器（测试里的假控件），
+        也就无所谓"被销毁"。这里不能用裸 ``hasattr`` + 调用，否则假控件会被误判成死的。
+        """
+        winfo_exists = getattr(root, "winfo_exists", None)
+        if winfo_exists is None:
+            return True
+        try:
+            return bool(winfo_exists())
+        except tkinter.TclError:
+            return False
 
     def get_pin(self, color, master=None):
         root = self._sync(master)

@@ -60,6 +60,33 @@ class ConfigManager:
             "pinned_items": []             # 持久化钉住的项目 [{path: str, coords: [x,y,w,h]}]
         }
 
+    @staticmethod
+    def _clean_pinned_items(items):
+        """逐元素清洗钉住条目。
+
+        只校验容器类型（``isinstance(value, list)``）是不够的：消费方（``pin_window``）
+        对每个元素都直接调 ``item.get(...)``，列表里混进一个字符串就会让「钉住」静默失败
+        —— 异常被 ``main._do_screenshot`` 的 except 吞掉，窗口不出现、也没有任何提示。
+
+        - 非 dict 的元素直接丢弃；
+        - ``pos`` 形状不对时只丢掉这个字段（保留钉住本身，让它回落到默认位置），
+          而不是把整条记录扔掉 —— 用户的钉住不该因为一个坏坐标就消失。
+        """
+        clean = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item = dict(item)
+            pos = item.get("pos")
+            if pos is not None:
+                valid = (isinstance(pos, (list, tuple)) and len(pos) == 2
+                         and all(isinstance(v, (int, float))
+                                 and not isinstance(v, bool) for v in pos))
+                if not valid:
+                    item.pop("pos", None)
+            clean.append(item)
+        return clean
+
     def _sanitize(self, user_config):
         """丢弃类型不符的配置项，避免脏配置在运行期引发崩溃"""
         clean = {}
@@ -71,7 +98,12 @@ class ConfigManager:
                 if isinstance(value, bool):
                     clean[key] = value
             elif isinstance(value, expected):
-                clean[key] = value
+                # 容器类型对不代表内容可用：pinned_items 是唯一有结构的字段，
+                # 也是唯一需要逐元素校验的字段
+                if key == "pinned_items":
+                    clean[key] = self._clean_pinned_items(value)
+                else:
+                    clean[key] = value
         return clean
 
     def load(self):
@@ -122,15 +154,19 @@ class ConfigManager:
             self.save()
 
     def get_pinned_items(self):
-        """线程安全地获取钉住窗口列表"""
+        """线程安全地获取钉住窗口列表。
+
+        在**读取边界**上也做一次清洗，让「返回的每个元素都是形状正确的 dict」
+        成为这个方法的硬保证 —— 消费方 ``pin_window`` 无条件信任这一点。
+        """
         with self._lock:
             items = self.config.get("pinned_items")
-            return list(items) if isinstance(items, list) else []
+            return self._clean_pinned_items(items) if isinstance(items, list) else []
 
     def set_pinned_items(self, items):
-        """线程安全地设置钉住窗口列表"""
+        """线程安全地设置钉住窗口列表（写入前清洗，坏数据不会落盘）"""
         with self._lock:
-            self.config["pinned_items"] = items
+            self.config["pinned_items"] = self._clean_pinned_items(items)
             self.save()
 
     def get_system_accent_color(self):

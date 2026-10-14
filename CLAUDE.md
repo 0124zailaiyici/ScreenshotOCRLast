@@ -33,6 +33,7 @@ Windows 截图工具，支持截图后三选一操作：钉住到屏幕、OCR �
 - **跨线程通信**：后台线程只写普通 Python dict，主线程每 200ms 轮询检测变化。严禁后台线程调用 `win.after()`、`win.winfo_exists()` 等 Tkinter 函数。
 - **配置路径**：配置、钉住图片、翻译历史一律存放在 `%APPDATA%/ScreenshotOCR/`，exe 可随意移动位置。任何新增的持久化数据都必须落到 `config_manager.config_dir`，禁止使用相对当前工作目录的路径。
 - **PhotoImage 生命周期**：`PhotoImage` 隶属于创建它的 Tk 解释器。把属于解释器 A 的句柄配置给解释器 B 的控件会抛 `TclError: image "pyimageN" doesn't exist`。`ui_icons.IconProvider.get_*(color, master=...)` 接受调用方控件，缓存以**该控件所属的 root** 为准并在其变化时失效。不要用 `tkinter._default_root` 判断 root 是否变化 —— 它只在为 None 时才被覆盖，两个 root 并存时识别不出来。新建 `PhotoImage` 一律显式传 `master`。
+  - **光比对 root 身份还不够，必须再确认解释器存活**：`Misc._root()` 只是纯 Python 属性遍历，一个已被 `destroy()` 的 root 仍等于它自己。`IconProvider._is_alive()` 用 `winfo_exists()`（抛 `TclError` 即已销毁）补上这一环；检测到已销毁时**当场抛 `RuntimeError` 并清空缓存**，而不是返回死句柄 —— 后者会在把图标配到某个活控件时才炸，报错位置离真正原因很远。没有 `winfo_exists` 的对象（测试里的假控件）按存活处理。回归防护：`test_app.py::test_icon_cache_invalidates_when_the_root_is_destroyed` 与 `test_icon_cache_still_works_with_fake_widgets`。
 - **OCR 失败契约**：识别失败必须抛 `ocr_engine.OcrError`，由 `ocr_window` 展示错误与修复引导。`OcrError.kind`（`not_found` / `lang_pack` / `other`）决定展示哪种引导 —— 只有 `not_found` 才弹「指定 tesseract.exe 路径」对话框。严禁把异常吞掉后返回形如 `"识别失败: ..."` 的字符串。
 - **截图会话锁**：`main._screenshot_lock` 保护单次截图会话，**从热键触发一直持有到会话结束**（用户可能长时间开着 OCR 窗口，这属于正常情况）。只有确认消费队列的 Tk 线程已死亡时才回收遗留锁。**绝不允许按时间阈值回收**：`threading.Lock` 没有属主概念，释放一个仍被合法持有的锁会让两个会话并发执行，并使后续 `release` 抛 `release unlocked lock`。
 
@@ -90,6 +91,8 @@ poll_result()
 位置：`%APPDATA%/ScreenshotOCR/screenshot_ocr_config.json`，首次运行自动生成。
 加载时会按 `ConfigManager._SCHEMA` 做类型校验，类型不符的条目会被丢弃并回落到默认值。
 
+**容器类型对不代表内容可用**：`pinned_items` 是唯一有结构的字段，因此额外做**逐元素**校验（`ConfigManager._clean_pinned_items`）—— 非 dict 的元素丢弃，`pos` 形状不对时只丢这个字段（保留钉住本身，别让用户的钉住因为一个坏坐标就消失）。清洗在三个边界上都做：`load()`（脏文件）、`set_pinned_items()`（写入）、`get_pinned_items()`（读取，让"返回的每个元素都是形状正确的 dict"成为硬保证）。**只校验 `isinstance(value, list)` 是不够的**：消费方 `pin_window` 对每个元素直接调 `item.get(...)`，列表里混进一个字符串就会抛 `AttributeError`，而这个异常被 `main._do_screenshot` 的 except 吞掉 —— 用户看到的是"点了钉住，什么都没发生，也没有任何提示"。
+
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
 | `hotkey` | `<alt>+x` | 全局快捷键 |
@@ -144,20 +147,21 @@ pytest>=7.0.0        # 单元测试框架
 ## 测试与验证
 
 ```bash
-pytest test_app.py test_integration.py test_pin_logic.py   # 46 个用例
+pytest test_app.py test_integration.py test_pin_logic.py   # 55 个用例
 python verify_app.py                                       # 环境自检，失败返回非零退出码
 ```
 
 - 测试是 **hermetic** 的：`conftest.py` 提供会话级共享 Tk root（反复新建/销毁 root 会让 Tcl 解释器失效），`isolated_config` 夹具把配置重定向到临时目录，**不会读写用户真实配置**。
 - 新增 UI 测试请复用 `tk_root` 与 `stub_ocr` 夹具，不要自行 `tk.Tk()`。
 - **夹具 teardown 顺序陷阱**：pytest 逆序拆卸夹具。任何在 teardown 里调用 `PinWindow._on_close()` 之类的清理夹具，**必须显式依赖 `isolated_config`**，否则 monkeypatch 会先被还原，清理动作就写到了用户真实配置上（`test_pin_logic.py` 的 `_cleanup_pin_windows` 就是这个写法）。
+- **`isolated_config` 必须连 `translator` 一起隔离**：`translator.py` 在**导入期**就 `from config import config_manager` 并构造了模块级单例 `Translator()`，而 `Translator.__init__` 当场把 `config_dir` 算成了 `history_file`。测试模块在**收集期**就 `from ocr_window import OcrWindow`，连带导入 `translator` —— 那时 fixture 还没运行，单例已经抓住了**用户真实目录**。所以只 `setattr(translator, "config_manager", cm)` 不够，**必须把单例上已经算好的 `history_file` 一起重定向**，否则从"隔离"上下文调用 `_save_history()` 会真的写进 `%APPDATA%/ScreenshotOCR/translation_history.json`。回归防护：`test_app.py::test_isolated_config_redirects_the_translator_singleton`。**教训**：凡是 `from config import config_manager` 这种模块级绑定，新增一个模块就要在 conftest 里补一处 —— 漏掉不会有任何报错，只会静默污染用户数据。
 - **回归防护必须强制失败路径**：例如 OCR 契约测试要 `monkeypatch` 掉 `pytesseract.image_to_string` 让它抛异常，否则在装有 Tesseract 的机器上会走成功路径，断言恒真、形同虚设。
 - `verify_app.py` 每一项都真的执行检查、可以失败；不要写死 `OK`。
 
 ## 已知注意事项
 
-- **DPI 感知**：`main.py` 在 import 任何 GUI 模块前调用 `SetProcessDPIAware()`，确保选区坐标与像素匹配。
-- **同一进程内不要并存 3 个以上 Tk 解释器**：实测会让 Tcl 找不到自己的库，抛 `TclError: Can't find a usable init.tcl`，且是否触发不稳定（会表现为偶发失败）。因此测试里**不要**为了验证「两个 root 并存」而真的 `tk.Tk()` 建多个解释器 —— 用带 `_root()` 方法的假控件直接测 `IconProvider._sync`（见 `test_integration.py::test_icon_cache_is_keyed_on_the_calling_widget_root`）。
+- **DPI 感知**：`main.py` 在 `if __name__ == "__main__":` 里（即**所有 import 之后**、任何窗口创建之前）调用 `ctypes.windll.shcore.SetProcessDpiAwareness(1)`，确保选区坐标与物理像素匹配。真实约束是"早于任何窗口创建"，不是"早于 import"。`SetProcessDpiAwareness` 全进程只生效一次，**不要**在别处再调 —— 那时 Tk 已在运行，只会拿到 `E_ACCESSDENIED` 并被 except 吞掉，属于"看起来有用其实无效"的代码。
+- **多 Tk 解释器**：曾观察到同进程内并存多个 Tk 解释器时抛 `TclError: Can't find a usable init.tcl`，**但未能稳定复现**（后续连开 6 个 `tk.Tk()` 全部正常）。不管触发条件是什么，测试里都**不要**为了验证「两个 root 并存」而真的建多个解释器 —— 用带 `_root()` 方法的假控件直接测 `IconProvider._sync`（见 `test_integration.py::test_icon_cache_is_keyed_on_the_calling_widget_root`）。这是防御性选择，与上面那条观察是否复现无关。
 - **Tesseract 预处理**：`ocr_engine.TesseractBackend._preprocess` 对小图自动放大，转灰度 + 对比度拉伸 + 锐化以提高识别率。该方法与识别引擎解耦，可在未安装 Tesseract 时单独测试。
 - **translators 超时**：`translator.py` 设 `timeout=15` 防止网络卡死。
 - **PyInstaller hidden imports**：`pytesseract`、`translators`、`PIL.ImageTk` 等库动态导入，需要显式 `--hidden-import`。
@@ -170,7 +174,7 @@ python verify_app.py                                       # 环境自检，失�
 - **UI 主题与自绘控件**：`ui_theme.py` 是唯一的颜色/字体/间距来源，`ui_widgets.py` 放 Tk 原生做不到的件（圆角卡片、细滚动条、扁平按钮、分段选择器）。改界面前先读这两个文件的模块注释。
 - **字体必须含中日韩字形**：`FONT_FAMILY` 是 `Microsoft YaHei UI`（同时含拉丁与中日韩字形）。**不要改回 `Segoe UI`** —— 它没有中文字形，Tk 只能逐字回退，中英文混排时字重/字距/基线全都不一致（实测症状：中文明显比英文粗）。注意 `Microsoft YaHei`（不带 ` UI`）这个名字在系统里**并不存在**，Tk 对不存在的字体名不报错、只静默回退，所以 `test_app.py::test_ui_font_family_is_actually_installed` 会拦住它。
 - **字号用「点」（正数），间距用 `px()`（逻辑像素）**：本程序是 DPI 感知的，Tk 会把点按 `tk scaling` 换算成物理像素（实测本机 150% 缩放，`tk scaling = 2.0`）。而 `padx`/`pady`/`width`/`height` 的单位是**物理像素**，直接写 12 在 150% 屏上只有 8 个逻辑像素、观感偏挤 —— 所以间距一律过 `ui_theme.px()`。窗口尺寸同理按 DPI 缩放（见 `ocr_window._compute_window_size`）。
-- **`RoundedCard` 的 Canvas 必须显式设 `width=1, height=1`**：Tk 的 Canvas **默认请求尺寸很大**（实测约 570x400），而 Canvas 的请求尺寸会一路传播到外层 Frame。不压掉的话，包着卡片的容器会虚报几百像素高，在窗口不够高时把空间吃光，排在它后面打包的兄弟控件被压成 0 高度、`winfo_ismapped()` 变 0 —— 实测踩过一次，整条状态栏消失。这条有两个回归防护：`test_app.py::test_rounded_card_does_not_inflate_its_parent_request`（根因层）与 `test_integration.py::test_ocr_window_layout_is_not_over_subscribed`（现象层）。
+- **`RoundedCard` 的 Canvas 必须显式设 `width=1, height=1`**：Tk 的 Canvas **默认请求尺寸很大** —— 实测 **382x268**（100% DPI），并随显示器缩放线性放大（150% 下约 573x402）。这个请求尺寸会一路传播到外层 Frame，不压掉的话包着卡片的容器会虚报几百像素高，在窗口不够高时把空间吃光，排在它后面打包的兄弟控件被压成 0 高度、`winfo_ismapped()` 变 0 —— 实测踩过一次，整条状态栏消失。这条有两个回归防护：`test_app.py::test_rounded_card_does_not_inflate_its_parent_request`（根因层，断言 `reqsize <= 2`）与 `test_integration.py::test_ocr_window_layout_is_not_over_subscribed`（现象层）。
 - **Tk 的 packer 在空间不够时按调用顺序分配**：固定尺寸的"外框"（操作栏、状态栏）要先打包，`expand=True` 的内容区放最后。这是惯用法，但**它本身不是上面那条 bug 的根因** —— 真正的根因是请求尺寸被虚报。两者都要做。
 - **Tk 的 Text 没有 line-height**：行距只能靠 `spacing1/2/3` 模拟，而三者语义不同 —— `spacing1/3` 只作用于**逻辑行**的上下，`spacing2` 才作用于同一逻辑行的**折行之间**。只设 `spacing1/3` 的话，长行折行处会紧贴上一行、硬换行处却很松，同一段文字里出现两种行距。正确组合是 `spacing1=0, spacing2=spacing3=extra`（见 `ocr_window._line_spacing`）。
 - **圆角只能自绘**：Tk 没有 `border-radius`。`RoundedCard` 用 `create_polygon(smooth=True)` 画圆角矩形，内容控件叠在上面 —— 因此**内容的内缩量必须 >= 圆角半径**，否则直角的控件会盖住圆角（`RoundedCard` 内部已强制 `max(padding, radius)`）。浮动工具栏的窗口圆角靠 `-transparentcolor` 抠出来（见 `screenshot_overlay._show_toolbar`）。

@@ -452,21 +452,28 @@ def test_rounded_card_padding_never_covers_the_corners(tk_root):
 def test_rounded_card_does_not_inflate_its_parent_request(tk_root):
     """回归防护：``RoundedCard`` 不得虚报请求尺寸。
 
-    Tk 的 Canvas 默认请求尺寸是 **570x400**，而 Canvas 的请求尺寸会传播到外层 Frame。
-    于是"包着卡片的容器"会声称自己要 396px 高，在窗口不够高时把空间吃光，排在它之后
-    打包的兄弟控件（实测是状态栏）被压成 0 高度、``winfo_ismapped()`` 变 0。
+    Tk 的 Canvas 默认请求尺寸很大 —— 实测 **382x268**（100% DPI），随显示器缩放线性
+    放大（150% 下约 573x402）。Canvas 的请求尺寸会传播到外层 Frame，于是"包着卡片的
+    容器"会声称自己要几百像素高，在窗口不够高时把空间吃光，排在它之后打包的兄弟控件
+    （实测是状态栏）被压成 0 高度、``winfo_ismapped()`` 变 0。
+
     这条测试直接盯住请求尺寸本身，比在窗口层面断言更贴近根因。
+
+    断言写成 ``<= 2`` 而不是某个"看着挺小"的数（比如 100）：``RoundedCard`` 里
+    Canvas 被显式设成 1x1，真实值就是 **1**，留 100 的余量等于放任它虚报 99px。
     """
     from ui_widgets import RoundedCard
 
     card = RoundedCard(tk_root, radius=8, padding=12)
     try:
         card.update_idletasks()
-        assert card.winfo_reqheight() < 100, (
+        assert card.winfo_reqheight() <= 2, (
             f"RoundedCard 请求了 {card.winfo_reqheight()}px 高度，"
             "说明 Canvas 的默认请求尺寸没有被压掉"
         )
-        assert card.winfo_reqwidth() < 100
+        assert card.winfo_reqwidth() <= 2, (
+            f"RoundedCard 请求了 {card.winfo_reqwidth()}px 宽度"
+        )
     finally:
         card.destroy()
 
@@ -519,3 +526,242 @@ def test_thin_scrollbar_hides_thumb_when_content_fits(tk_root):
         assert sb._thumb_geom[0] > top_before
     finally:
         host.destroy()
+
+
+def test_scrollbar_drag_survives_the_pointer_leaving(tk_root):
+    """回归防护：拖动滑块时指针离开控件，不得中断拖动。
+
+    滚动条只有 thickness 像素宽（150% DPI 下 9px），垂直拖动时指针稍一横向漂移就会
+    触发 ``<Leave>``。旧实现把 ``_drag`` 清掉，拖动直接断掉（或要等指针回到条上才继续）。
+    拖动只应由 ``<ButtonRelease-1>`` 结束。
+    """
+    import tkinter as tk
+
+    from ui_widgets import ThinScrollbar
+
+    host = tk.Toplevel(tk_root)
+    try:
+        moved = []
+        sb = ThinScrollbar(host, thickness=6, command=lambda *a: moved.append(a))
+        sb.pack(fill="both", expand=True)
+        host.geometry("120x200")
+        host.update()
+        sb.set(0.0, 0.25)          # 内容超出一屏，滑块可见
+        sb.update()
+
+        class _Evt:
+            def __init__(self, y):
+                self.y = y
+
+        top, thumb_h = sb._thumb_geom
+        sb._on_press(_Evt(top + thumb_h // 2))
+        assert sb._drag is not None, "按在滑块上应当开始拖动"
+
+        sb._on_leave(_Evt(0))      # 指针横向漂移离开控件
+        assert sb._drag is not None, "指针离开控件后拖动被中断了"
+
+        sb._on_motion(_Evt(top + thumb_h // 2 + 20))
+        assert moved, "离开控件后继续拖动应当仍然产生滚动"
+
+        sb._on_release(_Evt(0))
+        assert sb._drag is None, "松开按键后拖动必须结束"
+    finally:
+        host.destroy()
+
+
+# ---------- 配置：pinned_items 的元素级校验 ----------
+
+def test_sanitize_cleans_pinned_items_not_just_the_container():
+    """回归防护：``_sanitize`` 必须逐元素校验 ``pinned_items``。
+
+    只做 ``isinstance(value, list)`` 是不够的 —— 消费方（``pin_window``）对每个元素都
+    直接调 ``item.get(...)``。列表里混进一个字符串，点「钉住」就会抛
+    ``AttributeError: 'str' object has no attribute 'get'``，而这个异常被
+    ``main._do_screenshot`` 的 except 吞掉：窗口不出现、也没有任何提示。
+
+    ``pinned_items`` 是 ``_SCHEMA`` 里唯一有结构的字段，也是唯一需要逐元素校验的。
+    """
+    from config import ConfigManager
+
+    # 不跑 __init__，避免在测试里建目录
+    cm = ConfigManager.__new__(ConfigManager)
+
+    clean = cm._sanitize({
+        "hotkey": "<alt>+x",
+        "pinned_items": ["junk", 123, None, ["nested"], {"id": "ok", "path": "x"}],
+    })
+
+    assert clean["hotkey"] == "<alt>+x"
+    assert clean["pinned_items"] == [{"id": "ok", "path": "x"}], \
+        "非 dict 元素必须被丢掉，形状正确的 dict 必须原样保留"
+
+
+def test_dirty_pinned_items_are_dropped_at_load(tmp_path):
+    """端到端：脏配置文件读进来后，消费方拿到的必须是形状正确的 dict"""
+    import json as _json
+
+    from config import ConfigManager
+
+    cfg_dir = tmp_path / "ScreenshotOCR"
+    cfg_dir.mkdir()
+    (cfg_dir / "screenshot_ocr_config.json").write_text(_json.dumps({
+        "pinned_items": [
+            "junk", 123, None,
+            {"id": "good", "path": "x", "pos": [1, 2]},
+            {"id": "badpos", "path": "y", "pos": "not-a-pair"},
+            {"id": "badpos2", "path": "z", "pos": [1, "two"]},
+            {"id": "badpos3", "path": "w", "pos": [1, 2, 3]},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    cm = ConfigManager(config_dir=str(cfg_dir))
+    items = cm.get_pinned_items()
+
+    assert all(isinstance(i, dict) for i in items), "get_pinned_items 必须只返回 dict"
+    assert [i["id"] for i in items] == ["good", "badpos", "badpos2", "badpos3"], \
+        "坏坐标只该丢字段，不该把整条钉住记录扔掉（否则用户的钉住会无声消失）"
+    assert items[0]["pos"] == [1, 2]
+    for item in items[1:]:
+        assert "pos" not in item, f"{item['id']} 的坏 pos 没有被清掉"
+
+
+def test_set_pinned_items_refuses_to_write_malformed_entries(tmp_path):
+    """写入边界同样要清洗：坏数据不该被落盘"""
+    import json as _json
+
+    from config import ConfigManager
+
+    cm = ConfigManager(config_dir=str(tmp_path / "ScreenshotOCR"))
+    cm.set_pinned_items(["junk", {"id": "ok"}, 42])
+
+    assert cm.get_pinned_items() == [{"id": "ok"}]
+    with open(cm.config_path, encoding="utf-8") as f:
+        assert _json.load(f)["pinned_items"] == [{"id": "ok"}]
+
+
+# ---------- 测试隔离 ----------
+
+def test_isolated_config_redirects_the_translator_singleton(isolated_config):
+    """回归防护：``isolated_config`` 必须把 ``translator`` 也隔离掉。
+
+    ``translator`` 在**导入期**就执行了 ``from config import config_manager``，并当场
+    构造模块级单例 ``Translator()`` —— 而 ``Translator.__init__`` 会把
+    ``config_manager.config_dir`` 算成 ``history_file``。测试模块在**收集期**就
+    ``from ocr_window import OcrWindow``，连带导入 ``translator``，那时 fixture 还没运行，
+    单例已经抓住了**用户真实目录**。
+
+    所以只 ``setattr(translator, "config_manager", cm)`` 是不够的，必须把单例上
+    已经算好的 ``history_file`` 一起重定向。否则从"隔离"上下文调用 ``_save_history()``
+    会真的写进 ``%APPDATA%/ScreenshotOCR/translation_history.json``。
+    """
+    import os
+
+    import translator as translator_module
+
+    singleton = translator_module.translator
+
+    assert translator_module.config_manager is isolated_config, \
+        "translator 模块上的 config_manager 没被隔离"
+    assert singleton.history_file.startswith(isolated_config.config_dir), \
+        f"单例的 history_file 仍指向 {singleton.history_file}"
+
+    real_hist = os.path.join(
+        os.environ.get("APPDATA", ""), "ScreenshotOCR", "translation_history.json")
+
+    def _snapshot():
+        if not os.path.exists(real_hist):
+            return None
+        with open(real_hist, encoding="utf-8") as f:
+            return f.read()
+
+    before = _snapshot()
+    singleton._save_history("隔离测试原文", "隔离测试译文", "zh", "en")
+    after = _snapshot()
+
+    assert before == after, "隔离测试把翻译历史写进了用户真实目录"
+    assert os.path.exists(singleton.history_file), "应该写进临时目录"
+
+
+# ---------- 图标缓存 ----------
+
+def test_icon_cache_invalidates_when_the_root_is_destroyed():
+    """回归防护：``_sync`` 必须识别出「解释器已被销毁」。
+
+    ``Misc._root()`` 只是纯 Python 的属性遍历 —— 一个已经被 ``destroy()`` 的 root
+    仍然等于它自己。只比对身份的话会命中旧缓存，返回上一轮那个已被 Tcl 删除的
+    ``PhotoImage``，等到把它配到某个活控件时才炸成
+    ``TclError: image "pyimageN" doesn't exist`` —— 报错位置离真正的原因很远，
+    正是 ``IconProvider`` 的 docstring 声称要防的错误。
+
+    修复后的行为：当场抛一个说得清的 ``RuntimeError``，并把缓存清干净。
+    """
+    import tkinter as tk
+
+    import pytest as _pytest
+
+    from ui_icons import IconProvider
+
+    provider = IconProvider()
+    victim = tk.Tk()
+    victim.withdraw()
+    try:
+        provider.get_pin("#FFFFFF", master=victim)
+        assert provider._cache_root is victim
+        assert provider._cache, "第一次调用应该填充了缓存"
+
+        victim.destroy()
+
+        # 再向那个已销毁的控件要图标：必须当场报错，而不是返回死句柄
+        with _pytest.raises(RuntimeError, match="已被销毁"):
+            provider.get_pin("#FFFFFF", master=victim)
+
+        assert provider._cache_root is None, "发现解释器已死时必须清掉缓存归属"
+        assert not provider._cache, "死句柄不得留在缓存里"
+    finally:
+        try:
+            victim.destroy()
+        except tk.TclError:
+            pass
+
+
+def test_icon_cache_still_works_with_fake_widgets():
+    """回归防护：没有 ``winfo_exists`` 的假控件不能被误判成"已销毁"。
+
+    ``test_integration.py::test_icon_cache_is_keyed_on_the_calling_widget_root``
+    用假控件直接测 ``_sync``（避免在测试里建多个 Tk 解释器）。存活检查不能把这类
+    对象当成死的 —— 它们根本没有解释器可谈。
+    """
+    from ui_icons import IconProvider
+
+    class _FakeRoot:
+        pass
+
+    class _FakeWidget:
+        def __init__(self, root):
+            self._r = root
+
+        def _root(self):
+            return self._r
+
+    fake_root = _FakeRoot()
+    provider = IconProvider()
+    assert provider._sync(_FakeWidget(fake_root)) is fake_root
+
+
+def test_is_alive_reports_a_destroyed_interpreter_as_dead():
+    """``_is_alive`` 的判定逻辑：``winfo_exists()`` 抛 TclError 就是已销毁"""
+    import tkinter as tk
+
+    from ui_icons import IconProvider
+
+    class _DeadRoot:
+        def winfo_exists(self):
+            raise tk.TclError(
+                'can\'t invoke "winfo" command: application has been destroyed')
+
+    class _LiveRoot:
+        def winfo_exists(self):
+            return 1
+
+    assert IconProvider._is_alive(_LiveRoot()) is True
+    assert IconProvider._is_alive(_DeadRoot()) is False

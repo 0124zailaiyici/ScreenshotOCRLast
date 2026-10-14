@@ -48,9 +48,11 @@ class RoundedCard(tk.Frame):
                  card_bg=None, outer_bg=None, border=None, **kw):
         """``width=1, height=1`` 是刻意设置的，不要删。
 
-        Tk 的 Canvas 默认请求尺寸是 **570x400**，而 Canvas 的请求尺寸会一路传播到外层
-        Frame。于是包着卡片的容器会"虚报"自己要 396px 高，在窗口不够高时把空间吃光，
-        排在它后面打包的控件（实测是状态栏）会被压成 0 高度、``winfo_ismapped()`` 变 0。
+        Tk 的 Canvas 默认请求尺寸很大 —— 实测 **382x268**（100% DPI），并且随显示器缩放
+        线性放大（150% 缩放下约 573x402）。这个请求尺寸会一路传播到外层 Frame，于是
+        包着卡片的容器会"虚报"自己要几百像素高，在窗口不够高时把空间吃光，排在它后面
+        打包的控件（实测是状态栏）会被压成 0 高度、``winfo_ismapped()`` 变 0。
+
         把请求尺寸压到 1x1 后，卡片的实际大小完全由 ``pack(fill=..., expand=...)``
         决定，不再干扰兄弟控件的分配。需要按内容自适应时用 :meth:`fit_to_content`。
         """
@@ -197,14 +199,23 @@ class ThinScrollbar(tk.Canvas):
         self._redraw()
 
     def _on_leave(self, _event):
+        # 注意：**不要**在这里清 ``_drag``。滚动条只有 thickness 像素宽（150% DPI 下 9px），
+        # 垂直拖动时指针稍一横向漂移就会离开控件、触发 <Leave>，清掉 _drag 会让拖动中断。
+        # 拖动只由 <ButtonRelease-1> 结束（拖动期间已 grab，见 _on_press）。
         self._hover = False
-        self._drag = None
         self._redraw()
 
     def _on_press(self, event):
         top, thumb_h = self._thumb_geom
         if thumb_h and top <= event.y <= top + thumb_h:
             self._drag = (event.y, self._first)
+            # 抓住指针：否则指针一离开这几像素宽的区域，<B1-Motion> 就不再送到这里，
+            # 拖动会卡住（要等指针回到条上才继续）。grab 之后事件全部路由到本控件，
+            # 拖到窗口任意位置都跟手。
+            try:
+                self.grab_set()
+            except tk.TclError:
+                pass          # 控件尚未映射等情况下 grab 会失败，退化为原来的行为
         else:
             self._drag = None
             self._page_to(event.y)
@@ -221,6 +232,11 @@ class ThinScrollbar(tk.Canvas):
         self._move_to(first0 + delta)
 
     def _on_release(self, _event):
+        if self._drag is not None:
+            try:
+                self.grab_release()
+            except tk.TclError:
+                pass
         self._drag = None
 
     def _page_to(self, y):

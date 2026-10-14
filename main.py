@@ -41,16 +41,21 @@ class ScreenshotOCRApp:
             on_screenshot_callback=self._on_screenshot_trigger
         )
 
-        # 3. IPC 监听
-        self._start_ipc_server()
-
-        # 4. 持久化 Tk 线程 — 仅用于显示钉住窗口
+        # 3. 持久化 Tk 线程 — 仅用于显示钉住窗口
+        #    必须在 _start_ipc_server() **之前**建好：IPC 线程一启动就可能收到
+        #    "screenshot" 消息并回调 _on_screenshot_trigger，而它要用 self._pin_queue。
+        #    若队列还没建，会抛 AttributeError，并被 _start_ipc_server 里那个包着整个
+        #    while 循环的 except 吞掉 —— 后果是 IPC 服务线程**永久退出**，
+        #    之后第二个实例再启动就唤不出截图了。
         self._pin_root = None
         self._pin_queue = queue.Queue()
         self._pin_ready = threading.Event()
         self._pin_thread = threading.Thread(target=self._pin_loop, daemon=True)
         self._pin_thread.start()
         self._pin_ready.wait()
+
+        # 4. IPC 监听
+        self._start_ipc_server()
 
     # ---- 单实例检测 ----
 

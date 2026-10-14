@@ -128,3 +128,31 @@ def test_pin_close_cancels_topmost_timer(tk_root, isolated_config):
     assert win._topmost_job is not None
     win._on_close()
     assert win._topmost_job is None
+
+
+def test_pin_window_survives_a_dirty_pinned_items_config(tk_root, isolated_config):
+    """回归防护：配置里的 ``pinned_items`` 混进非 dict 元素时，「钉住」不得崩。
+
+    这是**真实的生产路径**：``PinWindow._apply_initial_position`` 和 ``_save_state``
+    都对列表元素直接调 ``item.get(...)``，且都没有 try/except 包住。列表里混进一个
+    字符串就抛 ``AttributeError``，被 ``main._do_screenshot`` 的 except 吞掉 ——
+    用户看到的现象是"点了钉住，什么都没发生，也没有任何提示"。
+
+    这里刻意直接往配置里塞脏数据（模拟被外部改坏的文件），而不是走 ``set_pinned_items``
+    —— 后者自己会清洗，测不出加载路径的问题。
+    """
+    isolated_config.config["pinned_items"] = [
+        "junk", 123, None, ["nested"],
+        {"id": "ok", "path": "x", "pos": [1, 2]},
+    ]
+
+    win = PinWindow(Image.new('RGB', (70, 70)), coords=(300, 300, 370, 370),
+                    master=tk_root)
+    win.root.update()
+
+    # 走到这里没抛异常就说明 _apply_initial_position / _save_state 都挺住了
+    assert win.root.winfo_exists()
+    assert win.root.winfo_ismapped() or win.root.winfo_viewable() is not None
+
+    # 落盘的内容里也不该再混有非 dict 元素
+    assert all(isinstance(i, dict) for i in isolated_config.get_pinned_items())

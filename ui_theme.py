@@ -75,6 +75,10 @@ def px(widget, value: float) -> int:
 
     所有传给 Tk 的 ``padx``/``pady``/``width``/``height``/``spacing*`` 都应该过这个函数，
     否则在高 DPI 屏上间距会按比例缩水。
+
+    ``max(1, ...)`` 是刻意的：``px(w, 0)`` 返回 1 而不是 0。Tk 里 0 宽/0 高的控件会被
+    packer 压没（``winfo_ismapped()`` 变 0），而调用方写 0 通常只是想表达"尽量小"，
+    不是想把控件弄消失。当前所有调用点传的都是正数，所以这只是个兜底。
     """
     return max(1, int(round(value * dpi_scale(widget))))
 

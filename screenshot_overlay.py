@@ -22,11 +22,10 @@ class ScreenshotOverlay:
         else:
             self.root = tk.Tk()
 
-        try:
-            import ctypes
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
+        # 注意：这里**不要**再调 SetProcessDpiAwareness()。它只能在整个进程里生效一次，
+        # 而 main.py 在 __main__ 里已经调过了；走到这里时 Tk 解释器已经存在，再调只会
+        # 返回 E_ACCESSDENIED 并被下面的 except 吞掉 —— 看起来有用，其实完全无效。
+        # 选区坐标与物理像素的对应关系由 main.py 那一次调用保证。
 
         # 截屏当前画面（在窗口显示前执行）
         self.full_screenshot = ImageGrab.grab(all_screens=True)
