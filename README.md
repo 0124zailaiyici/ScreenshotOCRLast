@@ -82,6 +82,8 @@ OCR 引擎 `tesseract.exe` 是每次识别时 spawn 的子进程、用完即退�
 python build_exe.py
 ```
 打包完成后，你可以在 `dist/` 目录下找到 `ScreenshotOCR.exe`。将它复制到桌面即可。
+
+打包脚本会在结束后**自检产物**：读回 exe、核对必需模块是否齐全、该排除的（pandas/numpy 等）是否确实没进去，不合格就以非零码退出。这样"看起来打包成功、用起来缺功能"的情况不会悄悄溜过去。
 3. **运行测试**：
    ```bash
    pytest test_app.py test_integration.py test_pin_logic.py
@@ -128,6 +130,7 @@ python build_exe.py
 - **\[Fix]** 收紧过松的断言：`RoundedCard` 请求尺寸的断言写成 `< 100`，而真实值是 **1** —— 上界松了 100 倍，虚报 99px 也能过。改为 `<= 2`
 - **\[Docs]** 修正 3 处不准确的文档：Canvas 默认请求尺寸是 **DPI 相关**的（100% 下 382x268，150% 下约 573x402），原文写死成 570x400；`SetProcessDpiAwareness` 实际在所有 import **之后**、窗口创建之前调用，不是"import 之前"；"并存 3 个以上 Tk 解释器会抛 init.tcl"这条**未能稳定复现**（连开 6 个正常），措辞已降级
 - **\[Chore]** 删除 `screenshot_overlay.py` 里无效的重复 `SetProcessDpiAwareness` 调用（Tk 已在运行时再调只会拿到 `E_ACCESSDENIED`）
+- **\[Build]** 打包脚本新增**产物自检**：读回 exe 核对必需模块是否齐全、该排除的是否确实没进去，不合格即非零退出。起因是 EXE 体积曾在两次构建间从 36MB 掉到 29MB，事后查不出少了什么 —— 体积变化无所谓，**静默少打模块**才是问题（`translators` 的依赖树全是动态导入，漏掉就会让翻译在 exe 里直接坏掉）。当前构建已确认是确定性的
 - **\[Test]** 测试 46 → **55 个**。新增的 9 条回归防护**每一条都实际验证过会失败** —— 逐个撤掉对应修复确认断言变红，避免写出恒真断言
 
 ### [v1.3.0] - 2026-10-13

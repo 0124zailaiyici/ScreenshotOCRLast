@@ -130,6 +130,17 @@ pyinstaller --noconsole --onefile --name "ScreenshotOCR" \
 
 打包务必使用不含 pandas/numpy 的干净 venv，原因见下方「pandas 体积陷阱」。
 
+### 构建后自检（`build_exe.py` 已内置，不要绕过）
+
+`build_exe.py` 在打包结束后会读回产物、核对模块清单，不合格就 `exit(1)`：
+
+- `REQUIRED_MODULES` 里的模块必须都在包里。**新增本项目模块后要往这里加**；
+- `FORBIDDEN_MODULES`（pandas / numpy / matplotlib / scipy / torch）必须都不在包里。
+
+**为什么需要这道检查**：EXE 体积曾在两次构建之间从 **36MB 掉到 29MB**，事后产物被覆盖、无法复原，查不出究竟少了什么。体积变化本身无所谓，**静默少打模块才是问题** —— 最可疑的是 `translators` 的依赖树（`cryptography` / `lxml` / `qh3` / 四套 HTTP 客户端，合计约 7MB），它们全是动态导入，漏掉的后果是"翻译在 exe 里直接坏掉，但打包过程一切正常"。当前构建是**确定性**的（连测两次都是 36.15MB）。
+
+读包内容时注意：**纯 Python 模块在 PYZ 里，而入口脚本 `main` 和所有原生扩展（`.pyd`/`.dll`）在顶层条目里，不在 PYZ**（例如 `win32\win32clipboard.pyd` 是以 `win32clipboard` 这个名字被 import 的）。只看 PYZ 会误报 `main` 和 `win32clipboard` 缺失。
+
 ## 依赖
 
 以 `requirements.txt` 为准：
