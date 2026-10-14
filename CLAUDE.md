@@ -22,7 +22,7 @@ Windows 截图工具，支持截图后三选一操作：钉住到屏幕、OCR �
   → main.py (_on_screenshot_trigger → 放入持久化 Tk 线程队列)
     → screenshot_overlay.py (全屏覆盖层，拖拽选区域)
       → 浮动工具栏 [钉住|识字|复制]
-        → pin_window.py (无边框浮窗，滚轮缩放)
+        → pin_window.py (无边框浮窗，拖动 / 滚轮缩放 / 右键菜单)
         → ocr_window.py (文字识别窗口 + 翻译)
         → clipboard_manager.py (复制图片到剪贴板)
 ```
@@ -45,7 +45,7 @@ Windows 截图工具，支持截图后三选一操作：钉住到屏幕、OCR �
 ├── main.py                   # 入口：持久化 Tk 线程 + 热键 + 托盘 + 单实例 IPC
 ├── config.py                 # JSON 配置读写 (%APPDATA%/ScreenshotOCR/)
 ├── screenshot_overlay.py     # 全屏选区覆盖层 + 浮动工具栏
-├── pin_window.py             # 钉住浮窗
+├── pin_window.py             # 钉住浮窗：拖动 / 滚轮缩放 / 右键菜单
 ├── ocr_window.py             # OCR 文字识别窗口 + 翻译
 ├── translator.py             # 翻译模块 (translators 库)
 ├── ocr_engine.py             # OcrBackend 抽象 + TesseractBackend + RapidOcrBackend + OcrError + 工厂
@@ -53,7 +53,7 @@ Windows 截图工具，支持截图后三选一操作：钉住到屏幕、OCR �
 ├── hotkey_listener.py        # 全局热键 (pynput)
 ├── tray_app.py               # 系统托盘 (pystray)
 ├── ui_theme.py               # 主题令牌：颜色 / 字体 / 间距 / DPI 换算 / 强调色派生
-├── ui_widgets.py             # 自绘控件：圆角卡片 / 细滚动条 / 扁平按钮 / 分段选择器
+├── ui_widgets.py             # 自绘控件：圆角卡片 / 细滚动条 / 扁平按钮 / 分段选择器 / 右键菜单
 ├── ui_icons.py               # 图标缓存管理器 (PIL 程序化生成，随 Tk root 失效)
 ├── conftest.py               # pytest 共享夹具（会话级 Tk root、配置隔离）
 ├── test_app.py               # 单元测试：配置 / 剪贴板 / OCR 契约 / 主题与自绘控件
@@ -104,6 +104,32 @@ poll_result()
 - **`rebuild_spaces` 只补拉丁/数字之间的空格**，汉字之间**绝不能插**（汉字字距本来就宽，无脑插会得到 `真 实 渲 染`）。阈值 `GAP_RATIO=0.45` / `MIN_GAP_PX=2` 是实测扫出来的（0.35 把 `passed` 拆成 `p assed`，0.6 把 `60 passed` 粘成 `60passed`）。另外有一条 `_is_unit_split` 规则：**不在两个单独的大写字母之间插**（`36.16MB` 的 M-B 间隙 5~6px 与真实空格 5~13px **数值上完全重叠**，纯阈值分不开）。
 - **`return_word_box=True` 必须传给 `__call__`，不能传给构造函数**（`main.py:82` 读的是 `kwargs.get("return_word_box", False)`），否则拿不到字符框，`rebuild_spaces` 直接失效。
 - **`ocr_window._do_ocr` 会自动降级**：请求的引擎不可用时按 `FALLBACK_ORDER` 换下一个，并在状态栏标注「已降级」与降级原因。失败时 `result["error_engine"]` 记下是哪个引擎失败的 —— 只有 `kind == "not_found"` **且失败的是 Tesseract** 才弹「指定 tesseract.exe 路径」引导。
+
+### 钉住窗口的右键菜单
+
+钉住窗口支持拖动、滚轮缩放、**右键菜单**。菜单由 `ui_widgets.ContextMenu` 自绘（圆角 + 深色），**不用 `tk.Menu`** —— Tk 在 Windows 上自绘的弹出菜单不受系统深色主题控制，会弹出一个浅灰方块，是这个全自绘界面里唯一不搭的东西。
+
+菜单项刻意只有三条：**复制图片**、**识别文字…**、**取消钉住**（中间一条分隔线把不可逆的那条隔开）。
+
+**旧行为是右键直接关闭窗口** —— 于是钉住的图既没法复制、也没法重新识别：想复制只能重新 `Alt+X` 截一次，而截图工具栏是"钉住 / 识字 / 复制"三选一，**不能都要**。改成菜单之后关闭挪进菜单里，`Esc` 仍然直接关闭。
+
+几个实现要点：
+
+- **复制必须用 `original_image`，不能用 `label` 上显示的图**。后者是滚轮缩放过的，直接复制出去画质会掉。这个区别只有在缩放之后才暴露，所以回归防护里刻意先缩到 50%。
+- **「识别文字」要把识字窗口挂在钉住窗口的父窗口下**（`self.root.master`），而不是钉住窗口本身 —— 否则关掉钉住会把识字窗口一起销毁。
+- **菜单打开时要暂停钉住窗口的置顶定时器**。`_ensure_topmost` 每 2 秒把窗口抬到 `HWND_TOPMOST`，会把刚弹出来的菜单盖住。
+- **`ContextMenu` 的关闭路径有四条**：点中某项、点菜单矩形之外、`Esc`、焦点离开。前两条靠 `grab_set()`（应用内的点击都会被重定向到菜单窗口，即便点在别的窗口上，坐标也落在矩形外，所以命中判定必须能识别出来）；第四条靠 `focus_force()` 之后的 `<FocusOut>` 兜底 —— 本地 grab 管不到应用外的点击。
+- **`_on_close` 要先关菜单再销毁窗口**：菜单持有 grab，直接销毁父窗口会留下一个孤儿 Toplevel。
+- **菜单的 `close()` 必须可重复调用**：关闭路径有四条，重复调用是常态而不是异常。
+- **边界收拢**：菜单在屏幕右下角弹出时必须往回收，否则会被裁掉一半。定位同样要 `withdraw()` → 一次性 `geometry()` → `deiconify()`（`overrideredirect` 的通用坑）。
+
+**回归防护的坑（第一版是恒真的，证伪时才发现）**：
+
+- 「右键弹菜单」不能直接调 `_on_context_menu` —— 那样只验证了处理函数，把 `bind` 改回 `_on_close` 照样通过。**必须真的 `event_generate("<Button-3>")`**。
+- 「点分隔线不执行任何东西」单独测是恒真的：`_row_at` 会跳过分隔线返回 -1，那条有 bug 的代码根本走不到。真正会暴露问题的是**点分隔线后面那一项**，所以两者合并在 `test_context_menu_dispatches_to_the_right_item` 里测。
+- `_rows` 与 `items` **都包含**分隔线，两者下标是对齐的 —— 不要凭空假设它们会错位。
+
+**`<Escape>` 依赖键盘焦点**：无边框窗口默认拿不到焦点，测试里必须先 `focus_force()`，否则焦点可能落在已被销毁的窗口上、键盘事件送不到。真实运行时新建的钉住窗口是拿得到焦点的（探针验证过），测试里显式聚焦只是为了不受用例执行顺序影响。
 
 ## 配置项
 
@@ -222,7 +248,7 @@ pytest>=7.0.0                  # 单元测试框架
 ## 测试与验证
 
 ```bash
-pytest test_app.py test_integration.py test_pin_logic.py   # 73 个用例
+pytest test_app.py test_integration.py test_pin_logic.py   # 88 个用例
 python verify_app.py                                       # 环境自检，失败返回非零退出码
 ```
 

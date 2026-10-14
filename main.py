@@ -166,7 +166,8 @@ class ScreenshotOCRApp:
                     win = show_ocr_window(image, coords=coords, master=session)
                     win.root.bind("<Destroy>", lambda e: _end_session(), True)
                 elif action == "pin":
-                    show_pin_window(image, coords=coords, master=self._pin_root)
+                    show_pin_window(image, coords=coords, master=self._pin_root,
+                                    notify=self.tray.notify)
                     _end_session()
                 elif action == "copy":
                     from clipboard_manager import clipboard_manager
@@ -218,7 +219,8 @@ class ScreenshotOCRApp:
                         img, coords=item.get("coords"),
                         master=self._pin_root,
                         pin_id=item["id"],
-                        scale=item.get("scale", 1.0)
+                        scale=item.get("scale", 1.0),
+                        notify=self.tray.notify
                     ))
             except Exception as e:
                 print(f"恢复钉住窗口失败: {e}")

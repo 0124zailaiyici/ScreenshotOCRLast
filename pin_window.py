@@ -6,25 +6,30 @@ import uuid
 import ctypes
 from config import config_manager
 from ui_theme import theme_manager
+from ui_widgets import show_context_menu
 
 class PinWindow:
-    """钉住浮窗：无边框置顶，支持滚轮缩放和鼠标拖拽"""
+    """钉住浮窗：无边框置顶，支持滚轮缩放、鼠标拖拽、右键菜单"""
     
     # 静态变量，用于追踪所有活跃的钉住窗口
     active_windows = []
 
-    def __init__(self, image, coords=None, master=None, pin_id=None, scale=1.0):
+    def __init__(self, image, coords=None, master=None, pin_id=None, scale=1.0,
+                 notify=None):
         """
         :param image: 截图图片
         :param coords: 截图时的原始坐标 (x1, y1, x2, y2)
         :param master: 父窗口
         :param pin_id: 持久化 ID
         :param scale: 初始缩放比例
+        :param notify: 可选的 ``notify(标题, 正文)`` 回调，用于操作反馈
         """
         self.original_image = image
         self.coords = coords
         self.current_scale = scale
         self.pin_id = pin_id or str(uuid.uuid4())
+        self.notify = notify
+        self._menu = None
         
         if master:
             self.root = tk.Toplevel(master)
@@ -55,7 +60,9 @@ class PinWindow:
         self.label.bind("<ButtonPress-1>", self._start_drag)
         self.label.bind("<B1-Motion>", self._do_drag)
         self.label.bind("<MouseWheel>", self._on_zoom)
-        self.root.bind("<Button-3>", self._on_close)  # 右键关闭
+        # 右键弹菜单，不再直接关闭 —— 旧行为下钉住的图既没法复制也没法重新
+        # 识别，只能重新截一次。关闭收进菜单里。
+        self.root.bind("<Button-3>", self._on_context_menu)
         self.root.bind("<Escape>", self._on_close)
         
         # 强制置顶定时器 (防止被其他 TOPMOST 窗口覆盖)
@@ -73,6 +80,11 @@ class PinWindow:
         """强制窗口置顶"""
         try:
             if self.root.winfo_exists():
+                # 菜单打开时不要抢置顶：这条定时器每 2 秒把本窗口抬到
+                # HWND_TOPMOST，会把刚弹出来的菜单盖住。让菜单自己待在最上面。
+                if self._menu is not None and self._menu.is_open:
+                    self._topmost_job = self.root.after(500, self._ensure_topmost)
+                    return
                 # 使用 Win32 API 强制置顶
                 hwnd = self.root.winfo_id()
                 # 某些情况下 winfo_id 返回的是容器 ID，需要获取父级句柄
@@ -112,6 +124,14 @@ class PinWindow:
         """关闭窗口并从活跃列表中移除，同时清理持久化数据"""
         if self in PinWindow.active_windows:
             PinWindow.active_windows.remove(self)
+
+        # 菜单可能正开着并持有 grab，先关掉再销毁窗口
+        if self._menu is not None:
+            try:
+                self._menu.close()
+            except Exception:
+                pass
+            self._menu = None
 
         # 取消置顶定时器，避免窗口销毁后回调仍被反复触发
         if self._topmost_job is not None:
@@ -197,6 +217,70 @@ class PinWindow:
         
         self.root.geometry(f"{width}x{height}+{target_x}+{target_y}")
 
+    # ---- 右键菜单 ----
+
+    def _on_context_menu(self, event):
+        """在鼠标位置弹出右键菜单。
+
+        刻意只放三条：复制图片、识别文字、取消钉住。它们对应钉住之后真正会想做
+        的事 —— 钉住是为了"等会儿还要用"，那就得能把它拿走（复制）、或者把它
+        里面的字拿出来（识别）。
+        """
+        # 已经开着就不要再叠一个（连点右键会叠出多层菜单）
+        if self._menu is not None and self._menu.is_open:
+            return
+
+        theme_manager.update(
+            is_dark=config_manager.is_dark_mode(),
+            accent_color=config_manager.get_system_accent_color()
+        )
+        items = [
+            ("复制图片", self._copy_image),
+            ("识别文字…", self._re_ocr),
+            None,  # 分隔线：把「取消钉住」这个不可逆操作和上面两条隔开
+            ("取消钉住", self._on_close),
+        ]
+        self._menu = show_context_menu(self.root, items,
+                                       event.x_root, event.y_root)
+
+    def _copy_image(self):
+        """把**原始分辨率**的截图复制到剪贴板。
+
+        用 ``original_image`` 而不是 ``label`` 上正在显示的那张：后者是滚轮缩放
+        过的，直接复制出去画质会掉。
+        """
+        from clipboard_manager import clipboard_manager
+
+        ok = clipboard_manager.copy_image(self.original_image)
+        if self.notify:
+            try:
+                if ok:
+                    self.notify("复制成功", "图片已复制到剪贴板")
+                else:
+                    self.notify("复制失败", "无法写入剪贴板")
+            except Exception:
+                pass
+
+    def _re_ocr(self):
+        """用原始截图重新识别，打开识字窗口。
+
+        钉住窗口一直留着 ``original_image``（原始分辨率），所以不需要重新截屏。
+        """
+        from ocr_window import show_ocr_window
+
+        try:
+            # 挂在钉住窗口的**父**窗口下，而不是钉住窗口本身 —— 否则关掉钉住会
+            # 顺手把识字窗口一起销毁。
+            parent = self.root.master or self.root
+            show_ocr_window(self.original_image, coords=self.coords, master=parent)
+        except Exception as e:
+            print(f"从钉住窗口打开识字窗口失败: {e}")
+            if self.notify:
+                try:
+                    self.notify("识别失败", str(e))
+                except Exception:
+                    pass
+
     def _start_drag(self, event):
         self._drag_start_x = event.x
         self._drag_start_y = event.y
@@ -212,10 +296,12 @@ class PinWindow:
         else: self.current_scale *= 0.9
         self._update_display()
 
-def show_pin_window(image, coords=None, master=None, pin_id=None, scale=1.0):
-    return PinWindow(image, coords=coords, master=master, pin_id=pin_id, scale=scale)
+def show_pin_window(image, coords=None, master=None, pin_id=None, scale=1.0,
+                    notify=None):
+    return PinWindow(image, coords=coords, master=master, pin_id=pin_id,
+                     scale=scale, notify=notify)
 
-def restore_pinned_windows(master=None):
+def restore_pinned_windows(master=None, notify=None):
     """从配置中恢复所有钉住的窗口"""
     for item in config_manager.get_pinned_items():
         try:
@@ -226,7 +312,8 @@ def restore_pinned_windows(master=None):
                     coords=item.get("coords"),
                     master=master,
                     pin_id=item["id"],
-                    scale=item.get("scale", 1.0)
+                    scale=item.get("scale", 1.0),
+                    notify=notify
                 )
         except Exception as e:
             print(f"恢复钉住窗口失败: {e}")

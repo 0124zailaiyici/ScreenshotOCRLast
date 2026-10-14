@@ -5,6 +5,7 @@
 """
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -1290,4 +1291,120 @@ def test_uninstaller_script_avoids_nested_quotes_and_uses_cmd_c(tmp_path):
     # 4. 复制到 %TEMP% 再执行，这是"不删自己所在目录"的关键
     assert any(ln.startswith("copy ") and "%TEMP%" in ln for ln in lines), \
         "脚本没有先把自身复制到 %TEMP% —— 批处理删不掉自己所在的目录"
+
+
+# ---------------------------------------------------------------------------
+# 自绘右键菜单（ui_widgets.ContextMenu）
+#
+# 不用 tk.Menu 是因为它在 Windows 上不受系统深色主题控制，会弹出一个浅灰方块。
+# 自绘就得自己管命中判定与关闭时机，下面几条钉住这些。
+# ---------------------------------------------------------------------------
+
+def _popup_menu(tk_root, items):
+    from ui_widgets import ContextMenu
+
+    menu = ContextMenu(tk_root, items).popup(200, 200)
+    tk_root.update()
+    return menu
+
+
+def test_context_menu_dispatches_to_the_right_item(tk_root):
+    """点哪一项就执行哪一项，且只执行一次。
+
+    菜单里**带一条分隔线**：``_rows`` 和 ``items`` 都含它，所以两者的下标是对齐
+    的 —— 这里同时覆盖"点分隔线什么都不执行"和"点分隔线后面那一项执行的是它
+    自己"两种情况。
+    """
+    calls = []
+    menu = _popup_menu(tk_root, [("甲", lambda: calls.append("甲")), None,
+                                 ("乙", lambda: calls.append("乙"))])
+    try:
+        # 1) 点分隔线：不执行任何东西，但菜单要关
+        sep = next(r for r in menu._rows if r["kind"] == "sep")
+        menu._on_click(SimpleNamespace(y=sep["y"] + sep["h"] // 2))
+        tk_root.update()
+        assert calls == [], f"点分隔线竟然执行了 {calls}"
+        assert not menu.is_open
+
+        # 2) 点分隔线后面那一项：必须执行它自己
+        after_sep = menu._rows[-1]
+        assert after_sep["label"] == "乙", "用例前提不成立"
+        menu._on_click(SimpleNamespace(y=after_sep["y"] + after_sep["h"] // 2))
+        tk_root.update()
+        assert calls == ["乙"], f"点「乙」执行了 {calls}"
+        assert not menu.is_open
+    finally:
+        menu.close()
+
+
+def test_context_menu_runs_the_first_item_too(tk_root):
+    """第一项也要能点 —— 命中判定的下界写错（例如 ``y <= row.y``）时只有第一项会失效。"""
+    calls = []
+    menu = _popup_menu(tk_root, [("甲", lambda: calls.append("甲")),
+                                 ("乙", lambda: calls.append("乙"))])
+    try:
+        first = menu._rows[0]
+        # 刻意点在这一行的**最上沿**，卡边界
+        menu._on_click(SimpleNamespace(y=first["y"]))
+        tk_root.update()
+        assert calls == ["甲"], f"点第一项执行了 {calls}"
+    finally:
+        menu.close()
+
+
+def test_context_menu_click_outside_closes_without_running_anything(tk_root):
+    """点菜单外面：关闭，但不能误触发某一项。
+
+    ``grab_set`` 会把应用内的点击重定向到菜单窗口，所以点在别的窗口上时事件
+    也送到这里、坐标落在矩形外 —— 命中判定必须能识别出来。
+    """
+    calls = []
+    menu = _popup_menu(tk_root, [("甲", lambda: calls.append("甲"))])
+    try:
+        menu._on_click(SimpleNamespace(y=-100))
+        tk_root.update()
+        assert calls == [], f"点菜单外面竟然执行了 {calls}"
+        assert not menu.is_open
+    finally:
+        menu.close()
+
+
+def test_context_menu_is_bounded_by_the_screen(tk_root):
+    """靠近屏幕右下角弹出时必须往回收，否则菜单会被裁掉一半。"""
+    from ui_widgets import ContextMenu
+
+    menu = ContextMenu(tk_root, [("复制图片", None), ("取消钉住", None)])
+    menu.popup(100000, 100000)
+    tk_root.update()
+    try:
+        geo = menu._win.geometry()
+        x = int(geo.split("+")[1])
+        y = int(geo.split("+")[2])
+        screen_w = menu._win.winfo_screenwidth()
+        screen_h = menu._win.winfo_screenheight()
+        # 先确认这段断言不是恒真的：位置确实被改过
+        assert x < 100000 and y < 100000, "完全没有做边界收拢"
+        assert x + menu._width <= screen_w
+        assert y + menu._height <= screen_h
+    finally:
+        menu.close()
+
+
+def test_context_menu_is_frameless_and_topmost(tk_root):
+    """菜单不能带原生标题栏 —— 否则圆角是白做的，而且会盖不住钉住窗口。"""
+    menu = _popup_menu(tk_root, [("甲", None)])
+    try:
+        assert menu._win.overrideredirect(), "菜单带了原生标题栏"
+        assert menu._win.attributes("-topmost")
+    finally:
+        menu.close()
+
+
+def test_context_menu_close_is_idempotent(tk_root):
+    """重复 close 不能抛异常 —— 关闭路径有好几条（点外面 / Esc / 关父窗口）。"""
+    menu = _popup_menu(tk_root, [("甲", None)])
+    menu.close()
+    menu.close()
+    tk_root.update()
+    assert not menu.is_open
 

@@ -12,6 +12,7 @@ Tk 没有 ``border-radius``，所有圆角都得用 Canvas 画；``tk.Scrollbar`
 
 import math
 import tkinter as tk
+from tkinter import font as tkfont
 
 from ui_theme import (
     FONT_BUTTON,
@@ -456,4 +457,221 @@ class DragGrip(tk.Canvas):
         for i in range(lines):
             y = i * (thickness + gap) + thickness / 2.0
             self.create_line(0, y, line_w, y, fill=color, width=thickness)
+
+
+class ContextMenu:
+    """自绘的右键菜单。
+
+    为什么不用 ``tk.Menu``
+    ----------------------
+    Tk 在 Windows 上自绘的弹出菜单不受系统深色主题控制，会弹出一个浅灰方块 ——
+    在这个从头到尾都是自绘（圆角卡片、细滚动条、无边框窗口）的界面里，它会是
+    唯一一个不搭的东西。所以这里同样用 Canvas 画。
+
+    菜单项
+    ------
+    ``items`` 是 ``(文案, 回调)`` 的序列；元素为 ``None`` 表示一条分隔线。
+    回调在**菜单关闭之后**才执行，避免回调里又弹窗/销毁窗口时和 grab 打架。
+
+    关闭时机
+    --------
+    1. 点中某一项；
+    2. 在菜单矩形之外点击（``grab_set`` 会把应用内的点击重定向到本窗口，
+       所以即便点在别的窗口上，事件也会送到这里、坐标落在矩形外）；
+    3. 按 Esc；
+    4. 焦点离开（点到别的程序去了 —— 本地 grab 管不到应用外，靠这条兜底）。
+
+    第 4 条要求菜单拿到过焦点，所以 ``popup`` 里会 ``focus_force()`` 一次。
+    """
+
+    #: 抠圆角用的透明色键，必须是界面上绝不会出现的颜色（与截图工具栏同一个值）
+    TRANSPARENT_KEY = "#FF00FE"
+
+    def __init__(self, master, items, *, font=None):
+        self.master = master
+        self.items = list(items)
+        self.font = font or FONT_BUTTON
+
+        self._win = None
+        self._canvas = None
+        self._rows = []
+        self._hover = -1
+        self._closed = True
+
+    # ---- 布局 ----
+
+    def _measure(self):
+        """算出行高、总尺寸，并记录每一行的 y 区间。
+
+        文案宽度用真实字体度量（``tkfont.Font.measure``），不是猜的 —— 中文和
+        拉丁字符宽度差很多，按字符数估算会得到长短不一的菜单。
+        """
+        theme = theme_manager.theme
+        font = tkfont.Font(root=self.master, font=self.font)
+        pad_x = px(self.master, 14)
+        row_pad = px(self.master, 7)
+        outer_pad = px(self.master, 5)
+        line_h = font.metrics("linespace")
+        sep_h = px(self.master, 7)
+
+        rows = []
+        y = outer_pad
+        widest = 0
+        for item in self.items:
+            if item is None:
+                rows.append({"kind": "sep", "y": y, "h": sep_h})
+                y += sep_h
+                continue
+            label, command = item
+            widest = max(widest, font.measure(label))
+            rows.append({"kind": "item", "label": label, "command": command,
+                         "y": y, "h": line_h + 2 * row_pad})
+            y += line_h + 2 * row_pad
+
+        self._rows = rows
+        self._font = font
+        self._pad_x = pad_x
+        self._row_pad = row_pad
+        self._width = widest + 2 * pad_x
+        self._height = y + outer_pad
+        self._radius = RADIUS_M
+        self._bg = theme.bg_card
+        self._border = theme.border_card
+        self._hover_bg = theme.bg_hover
+        self._divider = theme.divider
+        self._fg = theme.text_primary
+
+    def _redraw(self):
+        c = self._canvas
+        c.delete("all")
+        w, h = self._width, self._height
+        round_rect(c, 0, 0, w - 1, h - 1, self._radius,
+                   fill=self._bg, outline=self._border)
+
+        inset = px(self.master, 3)
+        for index, row in enumerate(self._rows):
+            if row["kind"] == "sep":
+                y = row["y"] + row["h"] / 2
+                c.create_line(self._pad_x, y, w - self._pad_x, y,
+                              fill=self._divider)
+                continue
+            if index == self._hover:
+                round_rect(c, inset, row["y"] + px(self.master, 1),
+                           w - inset, row["y"] + row["h"] - px(self.master, 1),
+                           max(1, self._radius - 2), fill=self._hover_bg)
+            c.create_text(self._pad_x, row["y"] + row["h"] / 2, anchor="w",
+                          text=row["label"], fill=self._fg, font=self.font)
+
+    def _row_at(self, y):
+        for index, row in enumerate(self._rows):
+            if row["kind"] == "sep":
+                continue
+            if row["y"] <= y < row["y"] + row["h"]:
+                return index
+        return -1
+
+    # ---- 交互 ----
+
+    def _on_motion(self, event):
+        index = self._row_at(event.y)
+        if index != self._hover:
+            self._hover = index
+            self._redraw()
+
+    def _on_click(self, event):
+        index = self._row_at(event.y)
+        # 点在菜单矩形之外也算"选中了菜单本身"，此时应当关闭而不是执行任何一项
+        if index < 0:
+            self.close()
+            return
+        command = self._rows[index].get("command")
+        self.close()
+        if command:
+            command()
+
+    def _on_escape(self, _event):
+        self.close()
+
+    def _on_focus_out(self, _event):
+        self.close()
+
+    # ---- 显示 / 关闭 ----
+
+    def popup(self, x, y):
+        """在屏幕坐标 ``(x, y)`` 处弹出。超出屏幕时会往回收。"""
+        self._measure()
+
+        win = tk.Toplevel(self.master)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        transparent = True
+        try:
+            win.attributes("-transparentcolor", self.TRANSPARENT_KEY)
+        except tk.TclError:
+            transparent = False
+
+        bg = self.TRANSPARENT_KEY if transparent else self._bg
+        win.configure(bg=bg)
+        canvas = tk.Canvas(win, width=self._width, height=self._height,
+                           bg=bg, bd=0, highlightthickness=0)
+        canvas.pack()
+        self._win = win
+        self._canvas = canvas
+
+        screen_w = win.winfo_screenwidth()
+        screen_h = win.winfo_screenheight()
+        x = max(0, min(x, screen_w - self._width))
+        y = max(0, min(y, screen_h - self._height))
+
+        # 先隐藏、一次性设好尺寸+位置、再显示 —— overrideredirect 窗口在映射前
+        # 设置的位置会被丢弃（同 ocr_window / screenshot_overlay 的处理）。
+        win.withdraw()
+        win.geometry(f"{self._width}x{self._height}+{x}+{y}")
+        win.deiconify()
+
+        self._redraw()
+        self._closed = False
+
+        # grab 让应用内的点击都回到本窗口（包括点在别的窗口上的），
+        # focus_force 让点到别的程序时能收到 FocusOut 兜底。
+        win.bind("<Motion>", self._on_motion)
+        win.bind("<Button-1>", self._on_click)
+        win.bind("<Escape>", self._on_escape)
+        win.bind("<FocusOut>", self._on_focus_out)
+        try:
+            win.grab_set()
+        except tk.TclError:
+            pass
+        try:
+            win.focus_force()
+        except tk.TclError:
+            pass
+        return self
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        win = self._win
+        self._win = None
+        self._canvas = None
+        if win is None:
+            return
+        try:
+            win.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            win.destroy()
+        except tk.TclError:
+            pass
+
+    @property
+    def is_open(self):
+        return not self._closed
+
+
+def show_context_menu(master, items, x, y, *, font=None):
+    """一次性弹出一个右键菜单，返回菜单对象（已打开）。"""
+    return ContextMenu(master, items, font=font).popup(x, y)
 
