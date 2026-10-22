@@ -440,57 +440,121 @@ def test_available_backends_never_raises(isolated_config):
     assert set(names) <= {"tesseract", "rapidocr"}
 
 
-def test_rapidocr_rebuilds_spaces_between_latin_only():
-    """回归防护：空格重建必须只在拉丁/数字之间插。
+def test_rapidocr_rebuilds_spaces_only_at_cjk_boundaries():
+    """回归防护：空格重建**只在「中日韩 ↔ 非中日韩」的边界**插。
 
-    RapidOCR 的识别模型经常吞空格（``pytest60passed``），但传
-    ``return_word_box=True`` 会返回**每个字符**的框，靠框间隙能补回来。
-    实测阈值 0.35 会把 ``passed`` 拆成 ``p assed``、0.6 会把 ``60 passed``
-    粘成 ``60passed``，所以取 0.45。
+    这条规则是拿真实截屏量出来的，**别再改回"拉丁文内部按间隙插"**：
 
-    **汉字之间绝不能插**：汉字本身字距就宽，无脑插会得到
-    ``真 实 渲 染 截 图 确 认`` 这种废文本（真踩过，中文被整个拆散）。
+    模型**自己就会输出空格字符**（``item[4]`` 里就有 ``' '`` 项）。它只是偶尔
+    漏空格，不是全吞。而拉丁文内部的间隙**分不开**——实测同一张真实截屏上：
+
+    - 不是空格的地方：``d|e``(detail) 5px、``h|e``(head) 6px、``w|o`` 5px、``m|j`` 5px
+    - 是空格的地方：``m|' '``(npm run) 5px、``3|/``(173 / fail) 11px
+
+    区间重叠，任何阈值都分不开（0.35 拆散 ``passed``、0.6 粘住 ``60 passed``，
+    这是早期就记录过的老问题）。而两类错误代价极不对称 —— 这是复制工具，
+    粘贴出去要能直接用：漏一个空格只是难看，多一个空格会让
+    ``look-at-real-size.m js``、``d eepseek`` 这种路径和标识符**直接废掉**。
+    改之前那一版在真实截屏上触发 6 次、错了 5 次。
+
+    CJK 边界则相反：中英/中数之间加空格无歧义，而模型在这里稳定漏
+    （``verify全部``、``包校验17项``），所以保留。
     """
     from ocr_engine import RapidOcrBackend
 
     def box(x0, x1):
         return [[x0, 0], [x1, 0], [x1, 20], [x0, 20]]
 
-    # 拉丁词之间留 7px 间隙（字宽 9px）-> 应插一个空格
-    latin_boxes = [box(0, 9), box(9, 19), box(19, 28), box(28, 37),
-                   box(37, 46), box(46, 55), box(62, 72), box(72, 82)]
-    item = [None, "pytest60", 0.9, latin_boxes, list("pytest60"), [0.9] * 8]
-    assert RapidOcrBackend.rebuild_spaces(item) == "pytest 60"
+    # 1) 拉丁文内部**不再插**，哪怕间隙很大（这里 11px 远超声明的 4.5px 阈值）
+    boxes = [box(0, 10), box(21, 31)]
+    item = [None, "ab", 0.9, boxes, list("ab"), [0.9] * 2]
+    assert RapidOcrBackend.rebuild_spaces(item) == "ab", (
+        "拉丁文内部又插空格了 —— 这正是把 deepseek 拆成 d eepseek 的那个 bug"
+    )
 
-    # 汉字之间**故意给一个超过阈值的间隙**（12px > 字宽 20px × 0.45 = 9px）。
-    # 第一版这里只给了 4px，低于阈值 —— 于是即使把 _is_cjk 改成恒 False，
-    # 测试照样通过，等于什么都没验。这正是"断言恒真"的陷阱。
+    # 2) 汉字之间也不插（汉字字距本来就宽，无脑插会得到 真 实 渲 染）
     cjk_boxes = [box(0, 20), box(32, 52), box(64, 84), box(96, 116)]
     item = [None, "真实渲染", 0.9, cjk_boxes, list("真实渲染"), [0.9] * 4]
     assert RapidOcrBackend.rebuild_spaces(item) == "真实渲染"
 
+    # 3) CJK ↔ 拉丁：**要插**（间隙 12px > 字宽 20px × 0.45 = 9px）
+    boxes = [box(0, 20), box(32, 42), box(42, 52)]
+    item = [None, "确s", 0.9, boxes, ["确", "s", "s"], [0.9] * 3]
+    assert RapidOcrBackend.rebuild_spaces(item) == "确 ss", (
+        "中英边界漏补空格了 —— 模型在 verify全部 这种地方就是稳定漏的"
+    )
 
-def test_rapidocr_rebuild_spaces_keeps_units_together():
-    """回归防护：不能在两个单独的大写字母之间插空格（``MB`` 不能被拆成 ``M B``）。
+    # 4) CJK ↔ 数字：同样要插
+    boxes = [box(0, 20), box(32, 42)]
+    item = [None, "验1", 0.9, boxes, ["验", "1"], [0.9] * 2]
+    assert RapidOcrBackend.rebuild_spaces(item) == "验 1"
 
-    实测数据：真实空格的间隙是 5~13px，而 ``MB`` 里 M 与 B 之间的 kerning 间隙
-    也是 5~6px —— **数值上完全重叠，靠调阈值分不开**（阈值 0.45 能保住
-    ``60 passed`` 但会拆散 ``MB``，0.6 反过来）。所以专门加了一条有界规则。
+    # 5) 边界上但**间隙不够**（汉字之间的正常字距）就不插
+    boxes = [box(0, 20), box(23, 33)]
+    item = [None, "验1", 0.9, boxes, ["验", "1"], [0.9] * 2]
+    assert RapidOcrBackend.rebuild_spaces(item) == "验1", (
+        "边界上间隙很小时不该插 —— 否则 第1章 会变成 第 1 章"
+    )
+
+    # 6) **汉字 ↔ 汉字不算边界**，哪怕间隙很大。
+    #    这条是踩出来的：`_is_word_char` 第一版用 `str.isalnum()`，而汉字在
+    #    Unicode 里也算字母（`"行".isalnum()` 是 True），于是「汉字↔汉字」被判成
+    #    边界，真实截屏上插出了 `运 行命 令`、`02生 活工作台`。必须限定 ASCII。
+    boxes = [box(0, 20), box(40, 60)]
+    item = [None, "运行", 0.9, boxes, ["运", "行"], [0.9] * 2]
+    assert RapidOcrBackend.rebuild_spaces(item) == "运行", (
+        "汉字之间又插空格了 —— 检查 _is_word_char 是不是用了 str.isalnum()"
+    )
+    assert not RapidOcrBackend._is_word_char("行"), (
+        "汉字被当成 word char 了 —— str.isalnum() 对汉字返回 True，必须用 isascii()"
+    )
+
+    # 7) **中文标点不算边界**：`：pass`、`510、left` 都不该插空格
+    for punct in ("：", "、", "，", "。"):
+        boxes = [box(0, 20), box(32, 42)]
+        item = [None, punct + "s", 0.9, boxes, [punct, "s"], [0.9] * 2]
+        assert RapidOcrBackend.rebuild_spaces(item) == punct + "s", (
+            f"中文标点 {punct!r} 后面被插了空格 —— 会得到 全部通过： pass 这种"
+        )
+
+    # 8) **另一侧是标点也不算边界**：`读取·D:` 里的 `·` 是分隔符，
+    #    在它前面补空格会变成 `读取 ··D:`
+    boxes = [box(0, 20), box(32, 42)]
+    item = [None, "取·", 0.9, boxes, ["取", "·"], [0.9] * 2]
+    assert RapidOcrBackend.rebuild_spaces(item) == "取·", (
+        "标点前面被插了空格 —— 读取·D:\\... 会变成 读取 ··D:\\..."
+    )
+
+
+def test_rapidocr_rebuild_spaces_leaves_real_words_intact():
+    """回归防护：真实截屏上被拆碎过的词，必须原样保留。
+
+    这里用的是**实测数据**，不是编出来的：在真实截屏的长路径行
+    （``读取 · D:\\demo\\AI\\deepseek-tui\\life-workbench\\...``）上，
+    ``workbench`` 这类词内部的逐字符间隙被量到 **5px**，而字宽约 9px ——
+    旧规则（``gap > 9 × 0.45 = 4.05`` 就在拉丁文内部插）于是把它插成了
+    ``w orkben ch``。同一条规则还拆碎了 ``deepseek`` → ``d eepseek``、
+    ``detail`` → ``d etail``、``head`` → ``h ead``、``mjs`` → ``m js``。
+
+    **这是复制工具**，这些词多数出现在路径和标识符里，多一个空格就直接废掉。
+    所以拉丁文内部一律不插。
     """
     from ocr_engine import RapidOcrBackend
 
     def box(x0, x1):
         return [[x0, 0], [x1, 0], [x1, 20], [x0, 20]]
 
-    # 每个字宽 10px，间隙 6px（> 10 × 0.45 = 4.5）—— 单看间隙会被判定成空格
-    boxes = [box(0, 10), box(16, 26)]
-    item = [None, "MB", 0.9, boxes, list("MB"), [0.9] * 2]
-    assert RapidOcrBackend.rebuild_spaces(item) == "MB", "MB 被拆成了 M B"
+    # workbench：9 个字符，每个宽 9px，**字符之间留 5px**（实测值）
+    chars = list("workbench")
+    boxes, x = [], 0
+    for _ in chars:
+        boxes.append(box(x, x + 9))
+        x += 14          # 9 宽 + 5 间隙
+    item = [None, "workbench", 0.9, boxes, chars, [0.9] * len(chars)]
 
-    # 但小写单字母词之间仍然要插（不能把规则做过头）
-    boxes = [box(0, 10), box(16, 26)]
-    item = [None, "ab", 0.9, boxes, list("ab"), [0.9] * 2]
-    assert RapidOcrBackend.rebuild_spaces(item) == "a b", "小写单字母词之间的空格被吞了"
+    assert RapidOcrBackend.rebuild_spaces(item) == "workbench", (
+        "workbench 又被拆开了 —— 这会把路径里的标识符直接毁掉"
+    )
 
 
 def test_rapidocr_rebuild_spaces_returns_raw_text_without_boxes():

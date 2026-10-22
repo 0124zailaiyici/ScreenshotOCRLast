@@ -305,9 +305,9 @@ class RapidOcrBackend(OcrBackend):
     二值化同理。所以 ``recognize`` 直接喂原图。
     """
 
-    #: 空格重建阈值：相邻字符框间隙超过「中位字宽 × 该比例」就判定为空格。
-    #: 0.35 会把 ``passed`` 拆成 ``p assed``，0.6 会把 ``60 passed`` 粘成 ``60passed``，
-    #: 实测 0.45 最稳。
+    #: 空格重建阈值：间隙超过「中位字宽 × 该比例」就判定为空格。
+    #: **只在「中日韩 ↔ 非中日韩」的边界上判定**，拉丁文内部一律不插 ——
+    #: 原因见 rebuild_spaces 的注释。
     GAP_RATIO = 0.45
     #: 间隙的绝对下限（像素）。只靠比例会在小字号图上误判。
     MIN_GAP_PX = 2
@@ -347,26 +347,83 @@ class RapidOcrBackend(OcrBackend):
     # ------------------------------------------------------------ 空格重建
 
     @staticmethod
-    def _is_cjk(ch: str) -> bool:
+    def _is_ideograph(ch: str) -> bool:
+        """是不是**汉字**（表意文字）。
+
+        **不要用「中日韩标点也算在内」的宽口径判断**（那种写法把 ``：`` ``、``
+        ``，`` 和全角字符也算进来）。补空格只在**汉字**旁边做，中文标点后面
+        **不加空格**，否则会得到 ``全部通过： pass``、``510、 left`` 这种。
+
+        这条是实测加的：真实截屏上 ``全部通过：pass`` 和 ``510、left`` 都被
+        插过错空格。
+        """
         return any(lo <= ord(ch) <= hi for lo, hi in (
-            (0x3000, 0x303F),   # 中日韩标点
-            (0x4E00, 0x9FFF),   # 中日韩统一表意文字
-            (0xFF00, 0xFFEF),   # 全角字符
+            (0x4E00, 0x9FFF),   # 统一表意文字
+            (0x3400, 0x4DBF),   # 扩展 A
+            (0xF900, 0xFAFF),   # 兼容表意文字
         ))
+
+    @staticmethod
+    def _is_word_char(ch: str) -> bool:
+        """**ASCII** 字母或数字 —— 补空格的**另一侧**必须是它。
+
+        **不能用 ``str.isalnum()`` 单独判断**：汉字在 Unicode 里也算字母，
+        ``"行".isalnum()`` 是 ``True`` —— 那样「汉字↔汉字」也会被判成边界，
+        插出 ``运 行命 令``、``02生 活工作台`` 这种废文本（真踩过）。
+
+        另一侧是标点时不补：``读取·D:\\...`` 里那个 ``·`` 是分隔符，
+        在它前面再加空格就成了 ``读取 ··D:``。
+        """
+        return ch.isascii() and ch.isalnum()
 
     @classmethod
     def rebuild_spaces(cls, item) -> str:
-        """按字符框的横向间隙把空格补回来。
+        """在**中日韩 ↔ 非中日韩的边界**上补空格，其余位置一律不动。
 
-        RapidOCR 的识别模型经常吞掉空格（``pytest60passed``、``EXE36.16MB``），
-        但调用时传 ``return_word_box=True`` 会额外返回**每个字符**的框与置信度
-        （item 变成 6 元组：``[框, 文本, 置信度, 字符框列表, 字符列表, 逐字置信度]``）。
-        同一个词内部的字符是紧挨着的（间隙 0~1px），词与词之间才留出明显间隙。
+        背景：RapidOCR 有时会吞掉空格，调用时传 ``return_word_box=True`` 会额外
+        返回每个字符的框与字符本身（item 变成 6 元组），于是可以按间隙把空格补回来。
 
-        **必须限定只在"非中日韩"字符之间插。** 汉字本身字距就宽，无脑插会得到
-        ``真 实 渲 染 截 图 确 认`` 这种废文本（实测过，中文会被整个拆散）。
+        **只在 CJK 边界补，不在拉丁文内部补。** 这是实测改出来的规则，改之前
+        先读完这段：
 
-        拿不到词框时（长度不足或与文本长度对不上）原样返回文本，绝不猜。
+        模型**自己就会输出空格字符**（``item[4]`` 里就有 ``' '`` 项，与 ``item[1]``
+        完全一致）。它的问题只是**偶尔漏掉**空格，而不是全吞。所以"按间隙补空格"
+        能捞到的收益有限，风险却很大。
+
+        拿真实截屏（中英混排 + 长路径）量过一轮，拉丁文内部的间隙**完全分不开**：
+
+        ====================  ==================  ==========================
+        位置                  间隙                真实情况
+        ====================  ==================  ==========================
+        ``d|e`` (detail)      5px                 **不是**空格
+        ``h|e`` (head)        6px                 **不是**空格
+        ``w|o`` (workbench)   5px                 **不是**空格
+        ``m|j`` (mjs)         5px                 **不是**空格
+        ``m|' '`` (npm run)   5px                 **是**空格
+        ``3|/`` (173 / fail)  11px                **是**空格
+        ====================  ==================  ==========================
+
+        区间重叠，**任何阈值都分不开**（0.35 拆散 ``passed``，0.6 粘住 ``60 passed``，
+        这是早期就记录过的老问题）。而两类错误的代价极不对称：
+
+        - 漏一个空格：``pytest60`` 少了空格，**能用**。
+        - 多一个空格：``look-at-real-size.m js``、``d eepseek``，**路径和标识符直接废掉**。
+
+        这是复制工具，粘贴出去的文本要能直接用，所以**宁可漏、不可多**。
+
+        改这一版之前，拉丁文内部的插入在真实截屏上触发 6 次、错了 5 次（约 17%
+        精确率），代价就是上面那些被拆碎的路径。
+
+        CJK 边界则相反：中英/中数之间加空格是约定俗成且无歧义的，而模型在这里
+        **稳定漏掉**（``verify全部``、``包校验17项``），所以保留。
+
+        边界还收紧了两处（都是实测撞出来的）：
+
+        - **只认汉字，不认中文标点**。用「中日韩标点也算在内」的宽口径判断当边界
+          会得到 ``全部通过： pass``、``510、 left`` —— 中文标点后面不加空格。
+          所以改用 ``_is_ideograph``。
+        - **另一侧必须是字母或数字**。``读取·D:\\...`` 里的 ``·`` 是分隔符，
+          在它前面补空格会变成 ``读取 ··D:``。所以另一侧用 ``_is_word_char``。
         """
         if len(item) < 5 or not item[3] or not item[4]:
             return item[1]
@@ -382,30 +439,29 @@ class RapidOcrBackend(OcrBackend):
 
         out = []
         for i, ch in enumerate(chars):
-            if i and not cls._is_cjk(chars[i - 1]) and not cls._is_cjk(ch):
+            if i and cls._is_space_boundary(chars[i - 1], ch):
                 gap = min(p[0] for p in boxes[i]) - max(p[0] for p in boxes[i - 1])
                 if (gap > median_w * cls.GAP_RATIO and gap >= cls.MIN_GAP_PX
-                        and not out[-1].endswith(" ")
-                        and not cls._is_unit_split(out, ch)):
+                        and not out[-1].endswith(" ")):
                     out.append(" ")
             out.append(ch)
         return "".join(out)
 
-    @staticmethod
-    def _is_unit_split(out, ch: str) -> bool:
-        """判断「在这里插空格」是不是把单位拆开了（``MB`` 被拆成 ``M B``）。
+    @classmethod
+    def _is_space_boundary(cls, left: str, right: str) -> bool:
+        """这一对相邻字符是不是该补空格的「汉字 ↔ 字母数字」边界。
 
-        实测数据：真实空格的间隙是 5~13px，而 ``MB`` 里 M 与 B 之间的 kerning
-        间隙也是 5~6px —— **数值上完全重叠，靠调阈值分不开**（0.45 能保住
-        ``60 passed`` 但拆散 ``MB``，0.6 反过来）。
+        一侧是汉字、另一侧是字母或数字，才算边界：
 
-        所以加一条有界的规则：**上一个词正好是单个大写字母、且当前字符也是大写
-        字母时不插**。只针对大写，避免误伤 ``a boy`` 这类正常的单字母词。
+        - ``和|v``（``第一件事和verify``）-> 是，补
+        - ``y|全``（``verify全部``）     -> 是，补
+        - ``验|1``（``包校验17项``）     -> 是，补
+        - ``：|p``（``通过：pass``）     -> 否，``：`` 是标点
+        - ``取|·``（``读取·D:``）        -> 否，``·`` 是标点
+        - ``d|e``                        -> 否，两侧都不是汉字
         """
-        if not ("A" <= ch <= "Z"):
-            return False
-        token = out[-1].split(" ")[-1] if out else ""
-        return len(token) == 1 and "A" <= token <= "Z"
+        return ((cls._is_ideograph(left) and cls._is_word_char(right))
+                or (cls._is_word_char(left) and cls._is_ideograph(right)))
 
     @staticmethod
     def _classify_error(exc) -> str:

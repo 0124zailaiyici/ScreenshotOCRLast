@@ -94,14 +94,23 @@ poll_result()
 | | RapidOCR | Tesseract |
 |---|---|---|
 | 中文 | **正确**（`真实渲染`） | 错字（`真实泻染`、`自检`→`目检`） |
-| 拉丁/数字 | 对，但会吞空格（靠 `rebuild_spaces` 补） | 对，空格保留 |
-| 用户真实难图相似度 | **100.0%** | 96.9% |
+| 拉丁/数字 | 对，**模型自己会输出空格**；`rebuild_spaces` 只在汉字边界补 | 对，空格保留 |
+| 用户真实难图相似度 | **100.0%**（**注意：该指标去掉了所有空白再比，看不见空格错误**） | 96.9% |
 | 速度 | 约 1.2s | 约 0.5s |
 | 依赖 | 模型随程序打包（+81MB） | 需外部安装 Tesseract 5.x |
 | 预处理 | **不做任何预处理**（2x 放大会掉到 77.1%） | 灰度 → 2x BICUBIC → Otsu |
 
 - **`RapidOcrBackend` 必须懒加载**：`import rapidocr_onnxruntime` 写在 `_module()` 里，`_get_engine()` 才真正构造 `RapidOCR()`（构造要读三个 ONNX 模型，很慢）。详见下方「`is_available()` 绝不能用 `import` 来判断」。
-- **`rebuild_spaces` 只补拉丁/数字之间的空格**，汉字之间**绝不能插**（汉字字距本来就宽，无脑插会得到 `真 实 渲 染`）。阈值 `GAP_RATIO=0.45` / `MIN_GAP_PX=2` 是实测扫出来的（0.35 把 `passed` 拆成 `p assed`，0.6 把 `60 passed` 粘成 `60passed`）。另外有一条 `_is_unit_split` 规则：**不在两个单独的大写字母之间插**（`36.16MB` 的 M-B 间隙 5~6px 与真实空格 5~13px **数值上完全重叠**，纯阈值分不开）。
+- **`rebuild_spaces` 只在「汉字 ↔ ASCII 字母数字」的边界补空格，别的地方一律不动**。这条规则是拿真实截屏量出来的，**不要再改回"拉丁文内部按间隙插"**：
+  - 模型**自己就会输出空格字符**（`item[4]` 里就有 `' '` 项，与 `item[1]` 完全一致），它只是偶尔漏，不是全吞。所以"按间隙补"能捞的收益有限，风险却很大。
+  - 拉丁文内部的间隙**分不开**：真实截屏上，不是空格的地方 `d|e`(detail) 5px、`h|e`(head) 6px、`w|o` 5px、`m|j` 5px；是空格的地方 `m|' '`(npm run) 5px、`3|/`(173 / fail) 11px。区间重叠，**任何阈值都分不开**（0.35 拆散 `passed`、0.6 粘住 `60 passed`，这是早期就记录过的老问题）。
+  - 两类错误代价极不对称，**这是复制工具**：漏一个空格只是难看；多一个空格会让 `look-at-real-size.m js`、`d eepseek` 这种路径和标识符**直接废掉**。改之前那一版在真实截屏上触发 6 次、错了 5 次。
+  - 用户反馈的就是这个现象（"识别总是出来有空格"）。**注意旧指标骗了我们**：当初说"相似度 100.0%"是 `difflib` 在**去掉所有空白之后**比的，**根本看不见空格错误** —— 评价 OCR 的空格必须单独看空格，不能只看去空白相似度。
+  - 边界判定用 `_is_ideograph` + `_is_word_char`，**不是** `_is_cjk`：
+    - `_is_cjk` 把**中文标点**也算进来，用它当边界会插出 `全部通过： pass`、`510、 left`（中文标点后面不加空格）。
+    - `_is_word_char` **必须限定 ASCII**（`ch.isascii() and ch.isalnum()`）。**不能只用 `str.isalnum()`**：汉字在 Unicode 里也算字母（`"行".isalnum()` 是 `True`），那样「汉字↔汉字」会被判成边界，插出 `运 行命 令`、`02生 活工作台`。
+  - 阈值 `GAP_RATIO=0.45` / `MIN_GAP_PX=2` 只用来判断"边界上到底有没有真空格"（`第1章` 这种没空格的不能插）。
+  - 回归防护：`test_app.py::test_rapidocr_rebuilds_spaces_only_at_cjk_boundaries`（含 `isalnum` 陷阱与中文标点两条）、`test_rapidocr_rebuild_spaces_leaves_real_words_intact`（用实测间隙复现 `workbench` 被拆的历史 bug）。三条变异（`isalnum`、`_is_cjk` 边界、旧的"两侧非 CJK 就插"）都已验证会被拦住。
 - **`return_word_box=True` 必须传给 `__call__`，不能传给构造函数**（`main.py:82` 读的是 `kwargs.get("return_word_box", False)`），否则拿不到字符框，`rebuild_spaces` 直接失效。
 - **`ocr_window._do_ocr` 会自动降级**：请求的引擎不可用时按 `FALLBACK_ORDER` 换下一个，并在状态栏标注「已降级」与降级原因。失败时 `result["error_engine"]` 记下是哪个引擎失败的 —— 只有 `kind == "not_found"` **且失败的是 Tesseract** 才弹「指定 tesseract.exe 路径」引导。
 
@@ -248,7 +257,7 @@ pytest>=7.0.0                  # 单元测试框架
 ## 测试与验证
 
 ```bash
-pytest test_app.py test_integration.py test_pin_logic.py   # 88 个用例
+pytest test_app.py test_integration.py test_pin_logic.py   # 89 个用例
 python verify_app.py                                       # 环境自检，失败返回非零退出码
 ```
 

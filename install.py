@@ -26,7 +26,7 @@ import sys
 
 APP_NAME = "ScreenshotOCR"
 APP_DISPLAY_NAME = "ScreenshotOCR 截图识字"
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 PUBLISHER = "ScreenshotOCR"
 
 #: 快捷方式的文件名。
